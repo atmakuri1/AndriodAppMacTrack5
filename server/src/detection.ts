@@ -5,6 +5,58 @@ import { authMiddleware, AuthRequest } from "./auth";
 
 export const detectionRouter = Router();
 
+// GET /detections
+// Optional query: ?event_id=...&mac_address=...&limit=200
+detectionRouter.get(
+  "/detections",
+  authMiddleware,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { event_id, mac_address } = req.query;
+      const limitRaw = (req.query.limit as string) ?? "200";
+      const limit = Math.min(parseInt(limitRaw, 10) || 200, 1000);
+
+      let sql = `
+        SELECT
+          blustick_id,
+          event_id,
+          mac_address,
+          signal_type,
+          rssi,
+          estimated_distance,
+          latitude,
+          longitude,
+          detected_at
+        FROM detections
+        WHERE 1=1
+      `;
+
+      const params: any[] = [];
+      let idx = 1;
+
+      if (event_id) {
+        sql += ` AND event_id = $${idx++}`;
+        params.push(event_id);
+      }
+
+      if (mac_address) {
+        sql += ` AND mac_address = $${idx++}`;
+        params.push(mac_address);
+      }
+
+      sql += ` ORDER BY detected_at DESC LIMIT $${idx}`;
+      params.push(limit);
+
+      const { rows } = await pool.query(sql, params);
+      res.json(rows);
+    } catch (err) {
+      console.error("Error in GET /detections:", err);
+      res.status(500).json({ error: "Failed to load detections" });
+    }
+  }
+);
+
+
 /**
  * POST /detections/batch
  * Body: { detections: NewDetectionInput[] }

@@ -111,16 +111,24 @@ export async function getEvents(limit = 100): Promise<EventRow[]> {
   return data as EventRow[];
 }
 
-export async function getDetections(params?: { event_id?: string; limit?: number }): Promise<DetectionRow[]> {
+export async function getDetections(params?: {
+  event_id?: string;
+  mac_address?: string;
+  limit?: number;
+}): Promise<DetectionRow[]> {
   const qs = new URLSearchParams();
   if (params?.event_id) qs.set("event_id", params.event_id);
+  if (params?.mac_address) qs.set("mac_address", params.mac_address);
   if (params?.limit) qs.set("limit", String(params.limit));
-  const res = await authedFetch(`/detections${qs.toString() ? `?${qs}` : ""}`);
+
+  const url = `/detections${qs.toString() ? `?${qs.toString()}` : ""}`;
+  console.log("[API] getDetections URL:", url);
+
+  const res = await authedFetch(url);
   const data = await safeJson(res);
   if (!res.ok) throw new Error(data?.error || "Failed to load detections");
   return data as DetectionRow[];
 }
-
 export async function getDevices(): Promise<DeviceRow[]> {
   const res = await authedFetch(`/devices`);
   const data = await safeJson(res);
@@ -236,4 +244,20 @@ export async function getEventDeviceDetections(
   const data = await safeJson(res);
   if (!res.ok) throw new Error(data?.error || "Failed to load detections");
   return data as DetectionRow[];
+}
+
+// ================== Device MAC summaries ==================
+
+export type DeviceMacSummary = {
+  mac_address: string;
+  detection_count: number;
+  first_seen: string;
+  last_seen: string;
+};
+
+export async function getDeviceMacSummaries(): Promise<DeviceMacSummary[]> {
+  const res = await authedFetch(`/device-macs`);
+  const data = await safeJson(res);
+  if (!res.ok) throw new Error(data?.error || "Failed to load device MACs");
+  return data as DeviceMacSummary[];
 }

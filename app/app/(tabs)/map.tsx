@@ -1,4 +1,4 @@
-// app/app/(tabs)/map.tsx
+// app/(tabs)/map.tsx
 import React, { useEffect, useState } from "react";
 import {
   View,
@@ -6,13 +6,17 @@ import {
   StyleSheet,
   ActivityIndicator,
   Pressable,
+  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import MapView, {
   Circle,
   PROVIDER_GOOGLE,
   Region,
+  Marker,
 } from "react-native-maps";
+import * as Location from "expo-location";
+import { useLocalSearchParams } from "expo-router";
 import { getDetections, DetectionRow } from "../../api";
 
 const DEFAULT_CENTER: Region = {
@@ -23,18 +27,79 @@ const DEFAULT_CENTER: Region = {
 };
 
 export default function MapScreen() {
+  const { mac: macFromParams } = useLocalSearchParams<{ mac?: string }>();
+  
   const [region, setRegion] = useState<Region>(DEFAULT_CENTER);
   const [detections, setDetections] = useState<DetectionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [userLocation, setUserLocation] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const [locationPermission, setLocationPermission] = useState(false);
+  const [activeMacAddress, setActiveMacAddress] = useState<string | undefined>(
+    macFromParams as string | undefined
+  );
 
-  const loadDetections = async () => {
+  const requestLocationPermission = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === "granted") {
+        setLocationPermission(true);
+        const location = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        const coords = {
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+        };
+        setUserLocation(coords);
+        // Center map on user location
+        setRegion({
+          ...coords,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        });
+      } else {
+        Alert.alert(
+          "Location Permission",
+          "Location permission is needed to show your position on the map."
+        );
+      }
+    } catch (error) {
+      console.warn("Error requesting location permission:", error);
+    }
+  };
+
+  const loadDetections = async (macAddress?: string) => {
     try {
       if (!refreshing) setLoading(true);
-      const data = await getDetections({ limit: 200 });
+      console.log("[Map] Loading detections with MAC filter:", macAddress);
+      
+      const data = await getDetections({ 
+        limit: 200,
+        mac_address: macAddress || undefined,
+      });
+      
+      console.log("[Map] Loaded", data.length, "detections");
+      
+      // Debug: Check how many have coordinates
+      const withCoords = data.filter(d => d.latitude != null && d.longitude != null);
+      console.log("[Map] Detections with coordinates:", withCoords.length);
+      
+      if (withCoords.length > 0) {
+        console.log("[Map] Sample detection:", {
+          mac: withCoords[0].mac_address,
+          lat: withCoords[0].latitude,
+          lng: withCoords[0].longitude,
+          distance: withCoords[0].estimated_distance,
+        });
+      }
+      
       setDetections(data);
     } catch (e: any) {
-      console.warn(e);
+      console.warn("[Map] Error loading detections:", e);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -42,32 +107,85 @@ export default function MapScreen() {
   };
 
   useEffect(() => {
-    loadDetections();
+    requestLocationPermission();
+    loadDetections(activeMacAddress);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Watch for MAC address changes from navigation
+  useEffect(() => {
+    if (macFromParams && macFromParams !== activeMacAddress) {
+      setActiveMacAddress(macFromParams as string);
+      loadDetections(macFromParams as string);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [macFromParams]);
 
   const onRefreshPress = () => {
     setRefreshing(true);
-    loadDetections();
+    loadDetections(activeMacAddress);
+  };
+
+  const centerOnUser = async () => {
+    if (!locationPermission) {
+      await requestLocationPermission();
+      return;
+    }
+    try {
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      const coords = {
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+      };
+      setUserLocation(coords);
+      setRegion({
+        ...coords,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      });
+    } catch (error) {
+      console.warn("Error getting location:", error);
+    }
+  };
+
+  const clearFilter = () => {
+    setActiveMacAddress(undefined);
+    loadDetections(undefined);
   };
 
   // turn estimated_distance (or fallback) into a visible radius in meters
   const getRadius = (d: DetectionRow) => {
-    const base = d.estimated_distance ?? 50; // if DB has meters, keep it; tweak as needed
-    // enforce a minimum size so circle is visible
-    return Math.max(40, base * 5); // you can adjust the *5 factor if you want bigger/smaller zones
+    const base = d.estimated_distance ?? 50;
+    return Math.max(40, base * 5);
   };
+
+  // Only show circles when a MAC address is selected
+  const shouldShowCircles = activeMacAddress !== undefined;
 
   return (
     <SafeAreaView style={s.root}>
       <View style={s.headerLine} />
 
       <View style={s.topBar}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={s.title}>Live Detections</Text>
           <Text style={s.subtitle}>
-            Blue zones show approximate areas of possible POIs.
+            {shouldShowCircles 
+              ? `Showing ${detections.filter(d => d.latitude != null && d.longitude != null).length} detections for ${activeMacAddress}`
+              : "Select a device from Event Logs to view detections"}
           </Text>
         </View>
+      </View>
+
+      <View style={s.buttonRow}>
+        <Pressable
+          onPress={centerOnUser}
+          style={s.locationBtn}
+        >
+          <Text style={s.locationBtnText}>📍 My Location</Text>
+        </Pressable>
 
         <Pressable
           onPress={onRefreshPress}
@@ -75,35 +193,53 @@ export default function MapScreen() {
           disabled={refreshing}
         >
           <Text style={s.refreshText}>
-            {refreshing ? "Refreshing…" : "Refresh"}
+            {refreshing ? "Refreshing…" : "↻ Refresh"}
           </Text>
         </Pressable>
+
+        {activeMacAddress && (
+          <Pressable onPress={clearFilter} style={s.clearBtn}>
+            <Text style={s.clearText}>✕ Clear</Text>
+          </Pressable>
+        )}
       </View>
 
       <View style={s.mapContainer}>
         <MapView
           style={s.map}
           provider={PROVIDER_GOOGLE}
-          initialRegion={region}
+          region={region}
           onRegionChangeComplete={setRegion}
           customMapStyle={darkMapStyle}
+          showsUserLocation={locationPermission}
+          showsMyLocationButton={false}
         >
-          {/* Translucent blue POI zones */}
-          {detections
-            .filter((d) => d.latitude != null && d.longitude != null)
-            .map((d) => (
-              <Circle
-                key={`${d.blustick_id}-${d.detected_at}`}
-                center={{
-                  latitude: d.latitude as number,
-                  longitude: d.longitude as number,
-                }}
-                radius={getRadius(d)} // meters
-                strokeColor="rgba(35,184,240,0.9)"   // bright edge
-                strokeWidth={2}
-                fillColor="rgba(35,184,240,0.25)"    // translucent blue fill
-              />
-            ))}
+          {/* User location marker (custom) */}
+          {userLocation && (
+            <Marker
+              coordinate={userLocation}
+              title="You are here"
+              pinColor="#5cd6ff"
+            />
+          )}
+
+          {/* Translucent blue POI zones - only show when MAC is selected */}
+          {shouldShowCircles &&
+            detections
+              .filter((d) => d.latitude != null && d.longitude != null)
+              .map((d, index) => (
+                <Circle
+                  key={`${d.blustick_id ?? "noid"}-${d.detected_at}-${index}`}
+                  center={{
+                    latitude: d.latitude as number,
+                    longitude: d.longitude as number,
+                  }}
+                  radius={getRadius(d)}
+                  strokeColor="rgba(35,184,240,0.9)"
+                  strokeWidth={2}
+                  fillColor="rgba(35,184,240,0.25)"
+                />
+              ))}
         </MapView>
 
         {loading && (
@@ -123,23 +259,56 @@ const s = StyleSheet.create({
 
   topBar: {
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    paddingTop: 10,
+    paddingBottom: 8,
   },
   title: { color: "#23b8f0", fontSize: 18, fontWeight: "800" },
   subtitle: { color: "#9aa4b2", fontSize: 12, marginTop: 2 },
 
-  refreshBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.6)",
-    backgroundColor: "rgba(12,24,40,0.9)",
+  buttonRow: {
+    flexDirection: "row",
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    gap: 8,
   },
-  refreshText: { color: "#5cd6ff", fontSize: 12, fontWeight: "600" },
+
+  locationBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.4)",
+    backgroundColor: "rgba(35,184,240,0.1)",
+    alignItems: "center",
+  },
+
+  locationBtnText: {
+    color: "#5cd6ff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
+  refreshBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.4)",
+    backgroundColor: "rgba(35,184,240,0.08)",
+    alignItems: "center",
+  },
+  refreshText: { color: "#5cd6ff", fontSize: 13, fontWeight: "600" },
+
+  clearBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255,107,107,0.6)",
+    backgroundColor: "rgba(255,107,107,0.1)",
+    alignItems: "center",
+  },
+  clearText: { color: "#ff6b6b", fontSize: 13, fontWeight: "600" },
 
   mapContainer: {
     flex: 1,

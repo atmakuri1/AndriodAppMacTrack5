@@ -51,6 +51,8 @@ function authMiddleware(req: any, res: any, next: any) {
   (req as any).user = auth.payload; // optional: attach payload for later
   next();
 }
+app.get("/device-macs", authMiddleware, listDeviceMacSummaries);
+app.get("/devices/:mac/detections", authMiddleware, listDetectionsForMac);
 
 
 // ========= Auth (profiles) =========

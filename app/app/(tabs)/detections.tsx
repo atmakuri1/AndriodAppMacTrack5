@@ -1,4 +1,4 @@
-// app/app/(tabs)/detections.tsx
+// app/(tabs)/detections.tsx
 import React, { useEffect, useState } from "react";
 import {
   View,
@@ -13,7 +13,7 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   DetectionRow,
   getDetections,
@@ -25,13 +25,17 @@ import {
   SimpleBleDevice,
 } from "../../bleClient";
 import * as SecureStore from "expo-secure-store";
+import { PermissionsAndroid } from "react-native";
 
 // emulator helper – keep OFF on real device
 const DEV_FAKE_DEVICES = false;
 
 export default function DetectionsScreen() {
-  const { event_id: initialEventId } =
-    useLocalSearchParams<{ event_id?: string }>();
+  const router = useRouter();
+  const { 
+    event_id: initialEventId,
+    mac: macFromParams 
+  } = useLocalSearchParams<{ event_id?: string; mac?: string }>();
 
   const [rows, setRows] = useState<DetectionRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,6 +48,11 @@ export default function DetectionsScreen() {
   // actually-applied filter
   const [activeEventId, setActiveEventId] = useState<string | undefined>(
     (initialEventId as string | undefined) || undefined
+  );
+
+  // MAC address filter
+  const [activeMacAddress, setActiveMacAddress] = useState<string | undefined>(
+    macFromParams as string | undefined
   );
 
   const [refreshing, setRefreshing] = useState(false);
@@ -60,16 +69,25 @@ export default function DetectionsScreen() {
   );
   const [deviceScanError, setDeviceScanError] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [lastUploadedCount, setLastUploadedCount] = useState<number | null>(null);
 
-  const loadDetections = async (eventId?: string) => {
+  const loadDetections = async (eventId?: string, macAddress?: string) => {
     try {
       setErr("");
       if (!refreshing) setLoading(true);
 
+      console.log("[Detections] Loading with filters:", { eventId, macAddress });
+
       const data = await getDetections({
         event_id: eventId || undefined,
+        mac_address: macAddress || undefined,
         limit: 200,
       });
+
+      console.log("[Detections] Loaded", data.length, "detections");
+      if (macAddress) {
+        console.log("[Detections] Sample MACs:", data.slice(0, 5).map(d => d.mac_address));
+      }
 
       setRows(data);
     } catch (e: any) {
@@ -82,47 +100,76 @@ export default function DetectionsScreen() {
 
   // initial load
   useEffect(() => {
-    loadDetections(activeEventId);
+    loadDetections(activeEventId, activeMacAddress);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Watch for MAC address changes from navigation
+  useEffect(() => {
+    if (macFromParams && macFromParams !== activeMacAddress) {
+      setActiveMacAddress(macFromParams as string);
+      loadDetections(activeEventId, macFromParams as string);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [macFromParams]);
 
   const applyFilter = () => {
     const trimmed = eventFilterInput.trim();
     const next = trimmed.length ? trimmed : undefined;
     setActiveEventId(next);
-    loadDetections(next);
+    loadDetections(next, activeMacAddress);
   };
 
   const refresh = () => {
     setRefreshing(true);
-    loadDetections(activeEventId);
+    loadDetections(activeEventId, activeMacAddress);
   };
 
   const clearFilter = () => {
     setEventFilterInput("");
     setActiveEventId(undefined);
-    loadDetections(undefined);
+    setActiveMacAddress(undefined);
+    loadDetections(undefined, undefined);
   };
 
-  /**
-   * 1) User taps "Sync from device"
-   *    => we scan for nearby BLE devices and show them in a list.
-   */
+  const viewOnMap = () => {
+    if (activeMacAddress) {
+      router.push({
+        pathname: "/(tabs)/map",
+        params: { mac: activeMacAddress },
+      });
+    }
+  };
+
   const startDeviceScan = async () => {
     try {
       setDeviceScanError("");
       setScanningDevices(true);
 
+      if (Platform.OS === "android" && Platform.Version >= 31) {
+        const granted = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        ]);
+
+        const allGranted = Object.values(granted).every(
+          (value) => value === PermissionsAndroid.RESULTS.GRANTED
+        );
+
+        if (!allGranted) {
+          setDeviceScanError("Bluetooth permissions not granted.");
+          setScanningDevices(false);
+          return;
+        }
+      }
+
       if (DEV_FAKE_DEVICES) {
-        console.log("DEV: fake scan for devices");
-        // keep the pre-filled devices so the UI always shows in emulator
         await new Promise((resolve) => setTimeout(resolve, 800));
         return;
       }
 
       setDevices([]);
-
-      // 👉 REAL BLE path (works only on physical device)
       const list = await scanForNearbyDevices(8000);
       setDevices(list);
 
@@ -137,10 +184,6 @@ export default function DetectionsScreen() {
     }
   };
 
-  /**
-   * 2) User taps one specific device from the list -> sync from that device.
-   *    Now uploads directly to backend without showing raw data.
-   */
   const syncFromSelectedDevice = async (deviceId: string) => {
     try {
       if (DEV_FAKE_DEVICES) {
@@ -152,8 +195,7 @@ export default function DetectionsScreen() {
       setSyncing(true);
       setErr("");
 
-      // Get JWT token for authentication
-      const token = await SecureStore.getItemAsync("jwt");
+      const token = await SecureStore.getItemAsync("token");
       if (!token) {
         console.warn("[UI] no JWT token, cannot upload detections");
         Alert.alert("Error", "Not authenticated. Please log in.");
@@ -161,11 +203,10 @@ export default function DetectionsScreen() {
       }
 
       console.log("[UI] Collecting detections from device:", deviceId);
-      
-      // 1) Collect detections from ESP32
+
       const batch = await collectDetectionsFromEsp32(
         activeEventId ?? null,
-        30000, // 30 seconds collection window
+        30000,
         { deviceId }
       );
 
@@ -173,23 +214,24 @@ export default function DetectionsScreen() {
 
       if (!batch.length) {
         Alert.alert("Info", "No detections received from device.");
+        setDevices([]);
         return;
       }
 
-      // 2) Upload directly to backend (no local state)
       console.log("[UI] Uploading detections to backend...");
       await createDetectionsBatch(batch);
-      
-      console.log("[UI] Upload successful!");
+
+      setLastUploadedCount(batch.length);
+
       Alert.alert(
         "Success",
         `${batch.length} detection${batch.length === 1 ? "" : "s"} uploaded to backend`
       );
 
-      // 3) Refresh the list to show newly uploaded detections
-      await loadDetections(activeEventId);
+      console.log("[UI] Upload successful!");
 
-      // ✅ after a successful sync, hide the device list to "collapse" that area
+      await loadDetections(activeEventId, activeMacAddress);
+
       setDevices([]);
     } catch (e: any) {
       console.error("[UI] Sync/upload failed:", e);
@@ -204,11 +246,69 @@ export default function DetectionsScreen() {
 
   const mono = Platform.select({ ios: "Menlo", android: "monospace" }) as any;
 
+  const renderDetectionItem = React.useCallback(({ item }: { item: DetectionRow }) => {
+    const monoFont = Platform.select({ ios: "Menlo", android: "monospace" }) as any;
+    
+    return (
+      <View style={s.card}>
+        <View style={s.cardHeader}>
+          <Text style={[s.mac, { fontFamily: monoFont }]}>
+            {item.mac_address ?? "(unknown)"}
+          </Text>
+          {item.signal_type && (
+            <View style={s.badge}>
+              <Text style={s.badgeText}>{item.signal_type}</Text>
+            </View>
+          )}
+        </View>
+
+        <View style={s.detailsGrid}>
+          <View style={s.detailItem}>
+            <Text style={s.detailLabel}>RSSI</Text>
+            <Text style={s.detailValue}>
+              {item.rssi ?? "–"} dBm
+            </Text>
+          </View>
+          <View style={s.detailItem}>
+            <Text style={s.detailLabel}>Distance</Text>
+            <Text style={s.detailValue}>
+              {item.estimated_distance != null
+                ? `${item.estimated_distance.toFixed(2)} m`
+                : "–"}
+            </Text>
+          </View>
+        </View>
+
+        <View style={s.detailsGrid}>
+          <View style={s.detailItem}>
+            <Text style={s.detailLabel}>Latitude</Text>
+            <Text style={s.detailValue}>{item.latitude ?? "–"}</Text>
+          </View>
+          <View style={s.detailItem}>
+            <Text style={s.detailLabel}>Longitude</Text>
+            <Text style={s.detailValue}>{item.longitude ?? "–"}</Text>
+          </View>
+        </View>
+
+        <Text style={s.time}>
+          {new Date(item.detected_at).toLocaleString()}
+        </Text>
+      </View>
+    );
+  }, []);
+
+  const keyExtractor = React.useCallback(
+    (item: DetectionRow, idx: number) =>
+      item.blustick_id ?? `${item.mac_address}-${item.detected_at}-${idx}`,
+    []
+  );
+
+  const renderSeparator = React.useCallback(() => <View style={{ height: 8 }} />, []);
+
   return (
     <SafeAreaView style={s.root}>
       <View style={s.headerLine} />
       <View style={s.content}>
-        {/* tiny dev badge so you know you're in fake mode */}
         {DEV_FAKE_DEVICES && (
           <View style={s.devBadge}>
             <Text style={s.devBadgeText}>DEV BLE FAKE MODE</Text>
@@ -232,12 +332,6 @@ export default function DetectionsScreen() {
           </View>
 
           <View style={s.actionRow}>
-            {activeEventId && (
-              <Pressable onPress={clearFilter} style={s.clearBtn}>
-                <Text style={s.clearText}>✕ Clear</Text>
-              </Pressable>
-            )}
-
             <Pressable
               onPress={startDeviceScan}
               disabled={scanningDevices || syncing}
@@ -264,6 +358,18 @@ export default function DetectionsScreen() {
                 {refreshing ? "↻ Refreshing..." : "↻ Refresh"}
               </Text>
             </Pressable>
+
+            {activeMacAddress && (
+              <Pressable onPress={viewOnMap} style={s.mapBtn}>
+                <Text style={s.mapText}>📍 Map</Text>
+              </Pressable>
+            )}
+
+            {(activeEventId || activeMacAddress) && (
+              <Pressable onPress={clearFilter} style={s.clearBtn}>
+                <Text style={s.clearText}>✕ Clear</Text>
+              </Pressable>
+            )}
           </View>
         </View>
 
@@ -285,7 +391,6 @@ export default function DetectionsScreen() {
               Tap &quot;Sync from device&quot; to scan for ESP32 units.
             </Text>
           ) : (
-            // ✅ Scrollable device list with max height so it doesn't take over the screen
             <ScrollView style={s.deviceList} nestedScrollEnabled>
               {devices.map((d) => (
                 <Pressable
@@ -310,13 +415,23 @@ export default function DetectionsScreen() {
         {/* Status indicator */}
         <View style={s.statusBar}>
           <Text style={s.statusText}>
-            {activeEventId ? (
+            {activeMacAddress ? (
               <>
-                Filtering:{" "}
+                MAC:{" "}
+                <Text style={s.statusHighlight}>{activeMacAddress}</Text>
+                {activeEventId && (
+                  <>
+                    {" | "}Event: <Text style={s.statusHighlight}>{activeEventId}</Text>
+                  </>
+                )}
+              </>
+            ) : activeEventId ? (
+              <>
+                Event:{" "}
                 <Text style={s.statusHighlight}>{activeEventId}</Text>
               </>
             ) : (
-              "Showing all events"
+              "Showing all detections"
             )}
           </Text>
           <Text style={s.countText}>{rows.length} detections</Text>
@@ -338,57 +453,15 @@ export default function DetectionsScreen() {
         ) : (
           <FlatList
             data={rows}
-            keyExtractor={(i, idx) =>
-              i.blustick_id ?? `${i.mac_address}-${i.detected_at}-${idx}`
-            }
-            ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
-            renderItem={({ item }) => (
-              <View style={s.card}>
-                <View style={s.cardHeader}>
-                  <Text style={[s.mac, { fontFamily: mono }]}>
-                    {item.mac_address ?? "(unknown)"}
-                  </Text>
-                  {item.signal_type && (
-                    <View style={s.badge}>
-                      <Text style={s.badgeText}>{item.signal_type}</Text>
-                    </View>
-                  )}
-                </View>
-
-                <View style={s.detailsGrid}>
-                  <View style={s.detailItem}>
-                    <Text style={s.detailLabel}>RSSI</Text>
-                    <Text style={s.detailValue}>
-                      {item.rssi ?? "—"} dBm
-                    </Text>
-                  </View>
-                  <View style={s.detailItem}>
-                    <Text style={s.detailLabel}>Distance</Text>
-                    <Text style={s.detailValue}>
-                      {item.estimated_distance != null
-                        ? `${item.estimated_distance.toFixed(2)} m`
-                        : "—"}
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={s.detailsGrid}>
-                  <View style={s.detailItem}>
-                    <Text style={s.detailLabel}>Latitude</Text>
-                    <Text style={s.detailValue}>{item.latitude ?? "—"}</Text>
-                  </View>
-                  <View style={s.detailItem}>
-                    <Text style={s.detailLabel}>Longitude</Text>
-                    <Text style={s.detailValue}>{item.longitude ?? "—"}</Text>
-                  </View>
-                </View>
-
-                <Text style={s.time}>
-                  {new Date(item.detected_at).toLocaleString()}
-                </Text>
-              </View>
-            )}
+            keyExtractor={keyExtractor}
+            renderItem={renderDetectionItem}
+            ItemSeparatorComponent={renderSeparator}
             contentContainerStyle={{ paddingBottom: 24 }}
+            removeClippedSubviews={true}
+            maxToRenderPerBatch={10}
+            updateCellsBatchingPeriod={50}
+            initialNumToRender={10}
+            windowSize={10}
           />
         )}
       </View>
@@ -516,6 +589,21 @@ const s = StyleSheet.create({
     fontWeight: "600",
   },
 
+  mapBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: "rgba(35,184,240,0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.4)",
+  },
+
+  mapText: {
+    color: "#5cd6ff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+
   deviceSection: {
     marginBottom: 12,
     padding: 10,
@@ -542,7 +630,6 @@ const s = StyleSheet.create({
     fontSize: 12,
   },
 
-  // ✅ scrollable area with maxHeight
   deviceList: {
     marginTop: 6,
     maxHeight: 200,
