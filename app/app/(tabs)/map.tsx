@@ -39,7 +39,7 @@ export default function MapScreen() {
   } | null>(null);
   const [locationPermission, setLocationPermission] = useState(false);
   const [activeMacAddress, setActiveMacAddress] = useState<string | undefined>(
-    macFromParams as string | undefined
+    macFromParams ? String(macFromParams) : undefined
   );
 
   const requestLocationPermission = async () => {
@@ -108,15 +108,20 @@ export default function MapScreen() {
 
   useEffect(() => {
     requestLocationPermission();
+    console.log("[Map] Initial mount with MAC:", activeMacAddress);
     loadDetections(activeMacAddress);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Watch for MAC address changes from navigation
   useEffect(() => {
-    if (macFromParams && macFromParams !== activeMacAddress) {
-      setActiveMacAddress(macFromParams as string);
-      loadDetections(macFromParams as string);
+    if (macFromParams) {
+      const macStr = String(macFromParams);
+      console.log("[Map] MAC param changed to:", macStr);
+      if (macStr !== activeMacAddress) {
+        setActiveMacAddress(macStr);
+        loadDetections(macStr);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [macFromParams]);
@@ -164,6 +169,20 @@ export default function MapScreen() {
   // Only show circles when a MAC address is selected
   const shouldShowCircles = activeMacAddress !== undefined;
 
+  // Get detections with coordinates sorted by timestamp
+  const detectionsWithCoords = detections.filter(
+    (d) => d.latitude != null && d.longitude != null
+  );
+
+  // Sort by timestamp for most recent (descending order)
+  const sortedByTime = [...detectionsWithCoords].sort(
+    (a, b) =>
+      new Date(b.detected_at).getTime() - new Date(a.detected_at).getTime()
+  );
+  const mostRecentDetection = sortedByTime[0]; // First in descending sort is most recent
+  
+  console.log("[Map] Most recent detection:", mostRecentDetection?.detected_at);
+
   return (
     <SafeAreaView style={s.root}>
       <View style={s.headerLine} />
@@ -173,7 +192,7 @@ export default function MapScreen() {
           <Text style={s.title}>Live Detections</Text>
           <Text style={s.subtitle}>
             {shouldShowCircles 
-              ? `Showing ${detections.filter(d => d.latitude != null && d.longitude != null).length} detections for ${activeMacAddress}`
+              ? `Showing ${detectionsWithCoords.length} detections for ${activeMacAddress}`
               : "Select a device from Event Logs to view detections"}
           </Text>
         </View>
@@ -223,23 +242,43 @@ export default function MapScreen() {
             />
           )}
 
-          {/* Translucent blue POI zones - only show when MAC is selected */}
+          {/* Detection circles - only show when MAC is selected */}
           {shouldShowCircles &&
-            detections
-              .filter((d) => d.latitude != null && d.longitude != null)
-              .map((d, index) => (
+            detectionsWithCoords.map((d, index) => {
+              // Determine if this is most recent detection
+              const isMostRecent = mostRecentDetection && 
+                d.detected_at === mostRecentDetection.detected_at &&
+                d.latitude === mostRecentDetection.latitude &&
+                d.longitude === mostRecentDetection.longitude;
+
+              // Color coding:
+              // - Most recent detection: Bright Green/Cyan
+              // - All others: Blue (default)
+              const strokeColor = isMostRecent 
+                ? "rgba(0,255,170,0.95)"  // Bright green/cyan for most recent
+                : "rgba(35,184,240,0.9)"; // Blue for others
+              
+              const fillColor = isMostRecent
+                ? "rgba(0,255,170,0.3)"
+                : "rgba(35,184,240,0.25)";
+
+              // Create unique key using multiple fields to avoid collisions
+              const uniqueKey = `circle-${d.blustick_id || 'no-id'}-${d.mac_address || 'no-mac'}-${d.detected_at}-${d.latitude}-${d.longitude}-${index}`;
+
+              return (
                 <Circle
-                  key={`${d.blustick_id ?? "noid"}-${d.detected_at}-${index}`}
+                  key={uniqueKey}
                   center={{
                     latitude: d.latitude as number,
                     longitude: d.longitude as number,
                   }}
                   radius={getRadius(d)}
-                  strokeColor="rgba(35,184,240,0.9)"
+                  strokeColor={strokeColor}
                   strokeWidth={2}
-                  fillColor="rgba(35,184,240,0.25)"
+                  fillColor={fillColor}
                 />
-              ))}
+              );
+            })}
         </MapView>
 
         {loading && (
@@ -249,6 +288,21 @@ export default function MapScreen() {
           </View>
         )}
       </View>
+
+      {/* Legend */}
+      {shouldShowCircles && detectionsWithCoords.length > 0 && (
+        <View style={s.legend}>
+          <Text style={s.legendTitle}>Legend</Text>
+          <View style={s.legendRow}>
+            <View style={[s.legendDot, { backgroundColor: "rgba(0,255,170,0.95))" }]} />
+            <Text style={s.legendText}>Most recent detection</Text>
+          </View>
+          <View style={s.legendRow}>
+            <View style={[s.legendDot, { backgroundColor: "rgba(35,184,240,0.9)" }]} />
+            <Text style={s.legendText}>Other detections</Text>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -330,6 +384,37 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(5,10,20,0.45)",
   },
   loadingText: { color: "#e6edf5", marginTop: 8 },
+
+  legend: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: "rgba(18,28,44,0.9)",
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.25)",
+  },
+  legendTitle: {
+    color: "#e6edf5",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  legendRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  legendDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  legendText: {
+    color: "#c9d5e3",
+    fontSize: 12,
+  },
 });
 
 // Optional dark map style so it fits BluStick theme

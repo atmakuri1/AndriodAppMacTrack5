@@ -50,9 +50,9 @@ export default function DetectionsScreen() {
     (initialEventId as string | undefined) || undefined
   );
 
-  // MAC address filter
+  // MAC address filter - initialize from params
   const [activeMacAddress, setActiveMacAddress] = useState<string | undefined>(
-    macFromParams as string | undefined
+    macFromParams ? String(macFromParams) : undefined
   );
 
   const [refreshing, setRefreshing] = useState(false);
@@ -86,6 +86,7 @@ export default function DetectionsScreen() {
 
       console.log("[Detections] Loaded", data.length, "detections");
       if (macAddress) {
+        console.log("[Detections] Filtering for MAC:", macAddress);
         console.log("[Detections] Sample MACs:", data.slice(0, 5).map(d => d.mac_address));
       }
 
@@ -100,15 +101,20 @@ export default function DetectionsScreen() {
 
   // initial load
   useEffect(() => {
+    console.log("[Detections] Initial mount with MAC:", activeMacAddress);
     loadDetections(activeEventId, activeMacAddress);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Watch for MAC address changes from navigation
   useEffect(() => {
-    if (macFromParams && macFromParams !== activeMacAddress) {
-      setActiveMacAddress(macFromParams as string);
-      loadDetections(activeEventId, macFromParams as string);
+    if (macFromParams) {
+      const macStr = String(macFromParams);
+      console.log("[Detections] MAC param changed to:", macStr);
+      if (macStr !== activeMacAddress) {
+        setActiveMacAddress(macStr);
+        loadDetections(activeEventId, macStr);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [macFromParams]);
@@ -298,8 +304,15 @@ export default function DetectionsScreen() {
   }, []);
 
   const keyExtractor = React.useCallback(
-    (item: DetectionRow, idx: number) =>
-      item.blustick_id ?? `${item.mac_address}-${item.detected_at}-${idx}`,
+    (item: DetectionRow, idx: number) => {
+      // Create a unique key using multiple fields to avoid collisions
+      const id = item.blustick_id || 'no-id';
+      const mac = item.mac_address || 'no-mac';
+      const time = item.detected_at || 'no-time';
+      const lat = item.latitude || 'no-lat';
+      const lng = item.longitude || 'no-lng';
+      return `detection-${id}-${mac}-${time}-${lat}-${lng}-${idx}`;
+    },
     []
   );
 
@@ -331,6 +344,7 @@ export default function DetectionsScreen() {
             </Pressable>
           </View>
 
+          {/* Primary actions row */}
           <View style={s.actionRow}>
             <Pressable
               onPress={startDeviceScan}
@@ -345,7 +359,7 @@ export default function DetectionsScreen() {
                   ? "Scanning…"
                   : syncing
                   ? "Syncing…"
-                  : "Sync from device"}
+                  : "Sync"}
               </Text>
             </Pressable>
 
@@ -355,19 +369,19 @@ export default function DetectionsScreen() {
               style={[s.refreshBtn, refreshing && { opacity: 0.6 }]}
             >
               <Text style={s.refreshText}>
-                {refreshing ? "↻ Refreshing..." : "↻ Refresh"}
+                {refreshing ? "↻" : "↻"}
               </Text>
             </Pressable>
 
             {activeMacAddress && (
               <Pressable onPress={viewOnMap} style={s.mapBtn}>
-                <Text style={s.mapText}>📍 Map</Text>
+                <Text style={s.mapText}>📍</Text>
               </Pressable>
             )}
 
             {(activeEventId || activeMacAddress) && (
               <Pressable onPress={clearFilter} style={s.clearBtn}>
-                <Text style={s.clearText}>✕ Clear</Text>
+                <Text style={s.clearText}>✕</Text>
               </Pressable>
             )}
           </View>

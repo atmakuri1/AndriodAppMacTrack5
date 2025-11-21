@@ -29,8 +29,15 @@ export default function EventLogsScreen() {
       if (!refreshing) setLoading(true);
 
       const data = await getDeviceMacSummaries();
-      // Sort by detection_count descending (most detected first)
-      const sorted = data.sort((a, b) => b.detection_count - a.detection_count);
+      // Sort by most recent last_seen first, then by detection_count descending
+      const sorted = data.sort((a, b) => {
+        const timeA = new Date(a.last_seen).getTime();
+        const timeB = new Date(b.last_seen).getTime();
+        if (timeB !== timeA) {
+          return timeB - timeA; // Most recent first
+        }
+        return b.detection_count - a.detection_count; // Then by detection count
+      });
       setRows(sorted);
     } catch (e: any) {
       console.error("[EventLogs] failed:", e);
@@ -83,7 +90,7 @@ export default function EventLogsScreen() {
               style={s.card}
               onPress={() =>
                 router.push({
-                  pathname: "/(tabs)/map",
+                  pathname: "/detections",
                   params: { mac: item.mac_address },
                 })
               }
