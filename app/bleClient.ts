@@ -1,26 +1,25 @@
-// blustick/app/bleClient.ts
+// blustick/app/bleClient.ts - Workaround: Don't call remove()
+
 import { BleManager, Device, Subscription, BleError } from "react-native-ble-plx";
 import { Buffer } from "buffer";
 import { parseBleNotificationPacket, resetBleParser } from "./bleParsing";
 import { NewDetectionInput } from "./api";
+import * as Location from 'expo-location';
+import { estimateLocationSimple } from './locationUtils';
 
-// Polyfill Buffer if needed
 (global as any).Buffer = (global as any).Buffer || Buffer;
 
 const ble = new BleManager();
 
-// From your scan: name + MAC (MAC just fallback)
 const TARGET_DEVICE_NAME = "nimble-bleprph";
 const TARGET_DEVICE_MAC = "80:F3:DA:54:EB:9A";
 
-// Firmware 16-bit UUIDs, expanded:
-const NOTIFY_SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"; // upload_svc_uuid
-const NOTIFY_CHAR_UUID    = "0000fff1-0000-1000-8000-00805f9b34fb"; // upload_chr_uuid
+const NOTIFY_SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb";
+const NOTIFY_CHAR_UUID    = "0000fff1-0000-1000-8000-00805f9b34fb";
 
-const WRITE_SERVICE_UUID  = "0000fff3-0000-1000-8000-00805f9b34fb"; // write_svc_uuid
-const WRITE_CHAR_UUID     = "0000fff2-0000-1000-8000-00805f9b34fb"; // recieve_chr_uuid
+const WRITE_SERVICE_UUID  = "0000fff3-0000-1000-8000-00805f9b34fb";
+const WRITE_CHAR_UUID     = "0000fff2-0000-1000-8000-00805f9b34fb";
 
-// For reading detections:
 const SERVICE_UUID = NOTIFY_SERVICE_UUID;
 const CHAR_UUID    = NOTIFY_CHAR_UUID;
 
@@ -29,10 +28,38 @@ export type SimpleBleDevice = {
   name: string | null;
 };
 
-/**
- * Scan for nearby BLE devices for a short time and return a unique list,
- * filtered so we ONLY keep devices with the ESP32 name (nimble-bleprph).
- */
+async function getUserLocation(): Promise<{ latitude: number; longitude: number } | null> {
+  try {
+    console.log('[Location] Requesting location permission...');
+    
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      console.warn('[Location] Permission denied');
+      return null;
+    }
+
+    console.log('[Location] Permission granted, getting position...');
+
+    const location = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+
+    console.log('[Location] ✅ User position:', {
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+      accuracy: location.coords.accuracy,
+    });
+
+    return {
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+    };
+  } catch (error) {
+    console.error('[Location] Failed to get user location:', error);
+    return null;
+  }
+}
+
 export async function scanForNearbyDevices(
   timeoutMs = 8000
 ): Promise<SimpleBleDevice[]> {
@@ -54,13 +81,12 @@ export async function scanForNearbyDevices(
       const name =
         device.name ?? (device as any).localName ?? null;
 
-      // 🔍 Only keep devices that match the ESP name
       const isTarget =
         name === TARGET_DEVICE_NAME ||
         (device as any).localName === TARGET_DEVICE_NAME;
 
       if (!isTarget) {
-        return; // ignore earbuds, laptops, etc.
+        return;
       }
 
       if (!seen.has(device.id)) {
@@ -77,9 +103,6 @@ export async function scanForNearbyDevices(
   });
 }
 
-/**
- * Dump all services + characteristics so we can verify UUIDs.
- */
 async function logServicesAndCharacteristics(device: Device) {
   try {
     const services = await device.services();
@@ -106,22 +129,26 @@ async function logServicesAndCharacteristics(device: Device) {
   }
 }
 
-/**
- * Scan (or connect directly) → subscribe to notifications → collect packets for `windowMs`.
- * If `opts.deviceId` is passed, we connect directly to that device.
- * Otherwise we look for the default TARGET_DEVICE_NAME / MAC.
- */
 export async function collectDetectionsFromEsp32(
   eventId: string | null,
   windowMs = 5000,
   opts?: { deviceId?: string }
 ): Promise<NewDetectionInput[]> {
-  // 🔄 Reset per collection so bootEpochMs is fresh
   resetBleParser();
 
   const detections: NewDetectionInput[] = [];
 
-  let connected: Device;
+  console.log('[BLE] Getting user location for detection estimation...');
+  const userLocation = await getUserLocation();
+  
+  if (userLocation) {
+    console.log('[BLE] ✅ Starting scan at user location:', 
+      `${userLocation.latitude.toFixed(6)}, ${userLocation.longitude.toFixed(6)}`);
+  } else {
+    console.warn('[BLE] ⚠️ No GPS location available - detections will have null lat/lon');
+  }
+
+  let connected: Device | null = null;
 
   try {
     if (opts?.deviceId) {
@@ -143,51 +170,27 @@ export async function collectDetectionsFromEsp32(
 
     console.log("[BLE] connected to device:", connected.id, connected.name);
 
-    // 🔥 REQUEST HIGHER MTU TO RECEIVE 80-BYTE PACKETS
+    // MTU negotiation
     try {
-      const currentMtu = connected.mtu; // It's a property, not a method
+      const currentMtu = connected.mtu;
       console.log("[BLE] current MTU:", currentMtu);
       
-      if (currentMtu < 83) { // Need at least 80 bytes + 3 bytes ATT overhead
+      if (currentMtu < 83) {
         console.log("[BLE] requesting MTU of 512 bytes...");
-        await connected.requestMTU(512); // Returns Device, not the MTU value
-        const newMtu = connected.mtu; // Read the property again after requesting
+        await connected.requestMTU(512);
+        const newMtu = connected.mtu;
         console.log("[BLE] ✅ MTU negotiated to:", newMtu, "bytes");
         
         if (newMtu < 83) {
-          console.warn("[BLE] ⚠️ MTU is still too small for 80-byte packets! Will receive in chunks.");
+          console.warn("[BLE] ⚠️ MTU is still too small for 80-byte packets!");
         }
       } else {
         console.log("[BLE] ✅ MTU is already sufficient:", currentMtu);
       }
     } catch (mtuError) {
       console.error("[BLE] MTU negotiation failed:", mtuError);
-      console.warn("[BLE] ⚠️ Will receive packets in 20-byte chunks");
     }
 
-    // Log disconnects
-    ble.onDeviceDisconnected(
-      connected.id,
-      (error: BleError | null, device: Device | null) => {
-        if (error) {
-          console.log("[BLE] Disconnect error:", {
-            message: error.message,
-            errorCode: error.errorCode,
-            errorName: error.name,
-          });
-        } else {
-          console.log(
-            "[BLE] Disconnected from device:",
-            device?.id,
-            device?.name
-          );
-        }
-        // Reset parser state on disconnect
-        resetBleParser();
-      }
-    );
-
-    // Dump all services & chars for debugging
     await logServicesAndCharacteristics(connected);
 
     console.log(
@@ -197,53 +200,69 @@ export async function collectDetectionsFromEsp32(
       CHAR_UUID
     );
 
-    const subscription: Subscription =
-      connected.monitorCharacteristicForService(
-        SERVICE_UUID,
-        CHAR_UUID,
-        (error, characteristic) => {
-          if (error) {
-            console.error("[BLE] monitor error:", error);
-            return;
-          }
-          if (!characteristic?.value) {
-            return;
-          }
-
-          try {
-            // value is base64 → convert to bytes → ArrayBuffer
-            const buf = Buffer.from(characteristic.value, "base64");
-            const bytes = new Uint8Array(buf);
-            const parsed = parseBleNotificationPacket(bytes.buffer, eventId);
-            if (parsed) {
-              detections.push(parsed);
-              console.log("[BLE] parsed detection:", parsed);
-            } else {
-              console.log("[BLE] parseBleNotificationPacket returned null");
-            }
-          } catch (e) {
-            console.error("[BLE] parse error:", e);
-          }
+    // 🔧 KEY FIX: Don't store subscription reference, don't call remove()
+    connected.monitorCharacteristicForService(
+      SERVICE_UUID,
+      CHAR_UUID,
+      (error, characteristic) => {
+        if (error) {
+          console.error("[BLE] monitor error:", error);
+          return;
         }
-      );
+        if (!characteristic?.value) {
+          return;
+        }
+
+        try {
+          const buf = Buffer.from(characteristic.value, "base64");
+          const bytes = new Uint8Array(buf);
+          const parsed = parseBleNotificationPacket(bytes.buffer, eventId);
+          
+          if (parsed) {
+            const detection: NewDetectionInput = { ...parsed };
+
+            if (userLocation && parsed.estimated_distance && parsed.estimated_distance > 0) {
+              const estimatedLocation = estimateLocationSimple(
+                userLocation,
+                parsed.estimated_distance
+              );
+              
+              detection.latitude = estimatedLocation.latitude;
+              detection.longitude = estimatedLocation.longitude;
+              
+              console.log(
+                `[BLE] 📍 Estimated location for ${parsed.mac_address}:`,
+                `${estimatedLocation.latitude.toFixed(6)}, ${estimatedLocation.longitude.toFixed(6)}`,
+                `(${parsed.estimated_distance.toFixed(1)}m from user)`
+              );
+            }
+            
+            detections.push(detection);
+          }
+        } catch (e) {
+          console.error("[BLE] parse error:", e);
+        }
+      }
+    );
 
     console.log("[BLE] collecting notifications for", windowMs, "ms…");
     await new Promise((resolve) => setTimeout(resolve, windowMs));
-
-    console.log("[BLE] done collecting notifications (we're not force-disconnecting here now).");
-    // We leave the device connection to firmware / OS timing for now.
+    
+    console.log("[BLE] collection complete, letting subscription clean up naturally...");
+    console.log("[BLE] collected", detections.length, "detections total");
+    
+    const withLocation = detections.filter(d => d.latitude !== null && d.longitude !== null).length;
+    console.log(`[BLE] 📍 ${withLocation}/${detections.length} detections have GPS coordinates`);
 
   } catch (e) {
     console.error("[BLE] collectDetectionsFromEsp32 FAILED:", e);
     throw e;
   }
 
+  // Let BLE library handle cleanup naturally
   return detections;
 }
 
-/**
- * INTERNAL: scan until we find a device with the given name or MAC (timeout after 10s).
- */
 async function scanForDevice(
   targetName: string,
   targetMac: string

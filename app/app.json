@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "BluStick needs your location to estimate where detected devices are located.",
+        "NSLocationAlwaysUsageDescription": "BluStick needs your location to track detections even when the app is in the background."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -32,6 +36,7 @@
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN"
       ],
@@ -56,7 +61,13 @@
         }
       ],
       "expo-secure-store",
-      "react-native-ble-plx"
+      "react-native-ble-plx",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow BluStick to access your location to estimate detected device positions."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

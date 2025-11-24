@@ -62,14 +62,34 @@ export async function createDetectionsBatch(
     return { inserted: 0 };
   }
 
-  const res = await authedFetch(`/detections/batch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ detections: rows }),
-  });
-  const data = await safeJson(res);
-  if (!res.ok) throw new Error(data?.error || "Failed to upload detections");
-  return data as { inserted: number };
+  console.log("[API] Uploading batch of", rows.length, "detections");
+  console.log("[API] First detection:", JSON.stringify(rows[0], null, 2));
+
+  try {
+    const res = await authedFetch(`/detections/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ detections: rows }),
+    });
+
+    console.log("[API] Response status:", res.status);
+    console.log("[API] Response headers:", JSON.stringify(res.headers, null, 2));
+
+    const data = await safeJson(res);
+    console.log("[API] Response body:", JSON.stringify(data, null, 2));
+
+    if (!res.ok) {
+      const errorMessage = data?.error || data?.details || `HTTP ${res.status}`;
+      console.error("[API] Upload failed:", errorMessage);
+      throw new Error(`Upload failed: ${errorMessage}`);
+    }
+
+    console.log("[API] Successfully uploaded", data.inserted, "detections");
+    return data as { inserted: number };
+  } catch (error: any) {
+    console.error("[API] createDetectionsBatch exception:", error);
+    throw error;
+  }
 }
 
 
@@ -129,6 +149,7 @@ export async function getDetections(params?: {
   if (!res.ok) throw new Error(data?.error || "Failed to load detections");
   return data as DetectionRow[];
 }
+
 export async function getDevices(): Promise<DeviceRow[]> {
   const res = await authedFetch(`/devices`);
   const data = await safeJson(res);

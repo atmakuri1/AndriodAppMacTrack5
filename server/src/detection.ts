@@ -62,54 +62,121 @@ detectionRouter.get(
  * Body: { detections: NewDetectionInput[] }
  * Inserts rows into the detections table.
  */
+// Replace the POST /detections/batch endpoint in detection.ts
+// This version doesn't insert user_id
+
 detectionRouter.post(
   "/detections/batch",
   authMiddleware,
   async (req: AuthRequest, res: Response) => {
-    const userId = req.user!.id;
     const { detections } = req.body as { detections: any[] };
 
+    console.log("[Backend] Batch upload request");
+    console.log("[Backend] Detections count:", detections?.length);
+
     if (!Array.isArray(detections) || detections.length === 0) {
+      console.error("[Backend] Invalid detections array");
       return res.status(400).json({ error: "detections must be a non-empty array" });
     }
+
+    // Log first detection for debugging
+    console.log("[Backend] First detection:", JSON.stringify(detections[0], null, 2));
 
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
-      for (const d of detections) {
-        await client.query(
-          `INSERT INTO detections (
-              user_id,
-              event_id,
-              mac_address,
-              signal_type,
-              rssi,
-              estimated_distance,
-              latitude,
-              longitude,
-              detected_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [
-            userId,
-            d.event_id,
-            d.mac_address,
-            d.signal_type,
-            d.rssi,
-            d.estimated_distance,
-            d.latitude,
-            d.longitude,
-            d.detected_at,
-          ]
-        );
+      let inserted = 0;
+      const errors: string[] = [];
+
+      for (let i = 0; i < detections.length; i++) {
+        const d = detections[i];
+        
+        // Validate required fields
+        if (!d.mac_address) {
+          errors.push(`Detection ${i}: missing mac_address`);
+          continue;
+        }
+
+        if (!d.detected_at) {
+          errors.push(`Detection ${i}: missing detected_at`);
+          continue;
+        }
+
+        // Validate timestamp format
+        try {
+          new Date(d.detected_at);
+        } catch {
+          errors.push(`Detection ${i}: invalid timestamp: ${d.detected_at}`);
+          continue;
+        }
+
+        try {
+          // ✅ Removed user_id from INSERT
+          await client.query(
+            `INSERT INTO detections (
+                event_id,
+                mac_address,
+                signal_type,
+                rssi,
+                estimated_distance,
+                latitude,
+                longitude,
+                detected_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [
+              d.event_id || null,
+              d.mac_address,
+              d.signal_type || "BLE",
+              d.rssi ?? null,
+              d.estimated_distance ?? null,
+              d.latitude ?? null,
+              d.longitude ?? null,
+              d.detected_at,
+            ]
+          );
+          inserted++;
+        } catch (rowError: any) {
+          console.error(`[Backend] Error inserting detection ${i}:`, rowError);
+          console.error(`[Backend] SQL Error code:`, rowError.code);
+          console.error(`[Backend] SQL Error detail:`, rowError.detail);
+          errors.push(`Detection ${i}: ${rowError.message}`);
+        }
+      }
+
+      if (inserted === 0) {
+        await client.query("ROLLBACK");
+        console.error("[Backend] No detections inserted. Errors:", errors);
+        return res.status(400).json({ 
+          error: "Failed to insert any detections",
+          details: errors.join("; ")
+        });
       }
 
       await client.query("COMMIT");
-      return res.json({ inserted: detections.length });
-    } catch (err) {
+      console.log(`[Backend] Successfully inserted ${inserted}/${detections.length} detections`);
+      
+      if (errors.length > 0) {
+        console.warn("[Backend] Some detections failed:", errors);
+      }
+
+      return res.json({ 
+        inserted, 
+        skipped: errors.length, 
+        errors: errors.length > 0 ? errors : undefined 
+      });
+
+    } catch (err: any) {
       await client.query("ROLLBACK");
-      console.error("Error inserting detections batch:", err);
-      return res.status(500).json({ error: "Failed to insert detections batch" });
+      console.error("[Backend] Transaction error:", err);
+      console.error("[Backend] Error code:", err.code);
+      console.error("[Backend] Error detail:", err.detail);
+      
+      return res.status(500).json({ 
+        error: "Database error",
+        details: err.message,
+        code: err.code
+      });
     } finally {
       client.release();
     }

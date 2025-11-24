@@ -190,65 +190,119 @@ export default function DetectionsScreen() {
     }
   };
 
-  const syncFromSelectedDevice = async (deviceId: string) => {
-    try {
-      if (DEV_FAKE_DEVICES) {
-        console.log("DEV: pretend syncing from", deviceId);
-        Alert.alert("Success", "1 detection uploaded (dev mode)");
-        return;
-      }
+// Replace syncFromSelectedDevice in detections.tsx
+// This version limits uploads to 20 detections for testing
 
-      setSyncing(true);
-      setErr("");
-
-      const token = await SecureStore.getItemAsync("token");
-      if (!token) {
-        console.warn("[UI] no JWT token, cannot upload detections");
-        Alert.alert("Error", "Not authenticated. Please log in.");
-        return;
-      }
-
-      console.log("[UI] Collecting detections from device:", deviceId);
-
-      const batch = await collectDetectionsFromEsp32(
-        activeEventId ?? null,
-        30000,
-        { deviceId }
-      );
-
-      console.log("[UI] Collected", batch.length, "detections");
-
-      if (!batch.length) {
-        Alert.alert("Info", "No detections received from device.");
-        setDevices([]);
-        return;
-      }
-
-      console.log("[UI] Uploading detections to backend...");
-      await createDetectionsBatch(batch);
-
-      setLastUploadedCount(batch.length);
-
-      Alert.alert(
-        "Success",
-        `${batch.length} detection${batch.length === 1 ? "" : "s"} uploaded to backend`
-      );
-
-      console.log("[UI] Upload successful!");
-
-      await loadDetections(activeEventId, activeMacAddress);
-
-      setDevices([]);
-    } catch (e: any) {
-      console.error("[UI] Sync/upload failed:", e);
-      Alert.alert(
-        "Error",
-        e?.message || "Failed to sync from device and upload to backend"
-      );
-    } finally {
-      setSyncing(false);
+const syncFromSelectedDevice = async (deviceId: string) => {
+  try {
+    if (DEV_FAKE_DEVICES) {
+      console.log("DEV: pretend syncing from", deviceId);
+      Alert.alert("Success", "1 detection uploaded (dev mode)");
+      return;
     }
-  };
+
+    setSyncing(true);
+    setErr("");
+
+    console.log("=== [UI] Starting Sync Process ===");
+
+    const token = await SecureStore.getItemAsync("token");
+    if (!token) {
+      console.error("[UI] ❌ No JWT token found");
+      Alert.alert("Error", "Not authenticated. Please log in.");
+      return;
+    }
+    console.log("[UI] ✅ Token found");
+
+    console.log("[UI] Connecting to device:", deviceId);
+
+    const batch = await collectDetectionsFromEsp32(
+      activeEventId ?? null,
+      30000,
+      { deviceId }
+    );
+
+    console.log("[UI] ✅ Collected", batch.length, "detections from ESP32");
+
+    if (!batch.length) {
+      console.log("[UI] No detections to upload");
+      Alert.alert("Info", "No detections received from device.");
+      setDevices([]);
+      return;
+    }
+
+    // 🧪 TESTING: Limit to first 20 detections
+    const TEST_LIMIT = 20;
+    const limitedBatch = batch.slice(0, TEST_LIMIT);
+    
+    if (batch.length > TEST_LIMIT) {
+      console.log(`[UI] 🧪 TEST MODE: Limiting upload to ${TEST_LIMIT} detections (collected ${batch.length})`);
+    }
+
+    // Show all detections we're uploading
+    console.log(`[UI] Uploading ${limitedBatch.length} detections:`);
+    limitedBatch.forEach((d, i) => {
+      console.log(`  [${i}]:`, JSON.stringify(d));
+    });
+
+    console.log("[UI] Uploading to backend...");
+
+    try {
+      const result = await createDetectionsBatch(limitedBatch);
+      
+      console.log("[UI] ✅ Upload successful!");
+      console.log("[UI] Result:", JSON.stringify(result));
+
+      setLastUploadedCount(limitedBatch.length);
+
+      // Show different message if we limited the upload
+      const message = batch.length > TEST_LIMIT
+        ? `TEST: Uploaded ${limitedBatch.length} of ${batch.length} detections successfully!\n\n(Limited for testing)`
+        : `${limitedBatch.length} detection${limitedBatch.length === 1 ? "" : "s"} uploaded successfully!`;
+
+      Alert.alert("Success", message);
+
+      // Refresh the list
+      await loadDetections(activeEventId, activeMacAddress);
+      setDevices([]);
+
+    } catch (uploadError: any) {
+      console.error("[UI] ❌ Upload failed");
+      console.error("[UI] Upload error:", uploadError);
+      throw uploadError;
+    }
+
+  } catch (e: any) {
+    console.error("=== [UI] ❌ Sync Failed ===");
+    console.error("[UI] Error type:", e?.constructor?.name);
+    console.error("[UI] Error message:", e?.message);
+    console.error("[UI] Error stack:", e?.stack);
+    
+    // Create detailed error message
+    let errorMsg = "Failed to sync from device";
+    
+    if (e?.message) {
+      if (e.message.includes("401") || e.message.includes("auth")) {
+        errorMsg = "Authentication error. Please log in again.";
+      } else if (e.message.includes("Network")) {
+        errorMsg = "Network error. Check your connection.";
+      } else if (e.message.includes("timeout")) {
+        errorMsg = "Connection timeout. Try again.";
+      } else {
+        errorMsg = e.message;
+      }
+    }
+    
+    Alert.alert(
+      "Sync Failed",
+      errorMsg + "\n\nCheck console logs for details."
+    );
+    
+    setErr(errorMsg);
+  } finally {
+    setSyncing(false);
+  }
+};
 
   const mono = Platform.select({ ios: "Menlo", android: "monospace" }) as any;
 

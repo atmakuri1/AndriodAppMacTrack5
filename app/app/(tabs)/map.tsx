@@ -233,15 +233,6 @@ export default function MapScreen() {
           showsUserLocation={locationPermission}
           showsMyLocationButton={false}
         >
-          {/* User location marker (custom) */}
-          {userLocation && (
-            <Marker
-              coordinate={userLocation}
-              title="You are here"
-              pinColor="#5cd6ff"
-            />
-          )}
-
           {/* Detection circles - only show when MAC is selected */}
           {shouldShowCircles &&
             detectionsWithCoords.map((d, index) => {
