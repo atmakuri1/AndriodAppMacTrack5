@@ -1,5 +1,5 @@
-// app/(tabs)/detections.tsx
-import React, { useEffect, useState } from "react";
+// app/(tabs)/detections.tsx - Simplified version
+import React, { useEffect, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -9,16 +9,11 @@ import {
   Platform,
   TextInput,
   Pressable,
-  ScrollView,
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import {
-  DetectionRow,
-  getDetections,
-  createDetectionsBatch,
-} from "../../api";
+import { DetectionRow, getDetections, createDetectionsBatch } from "../../api";
 import {
   collectDetectionsFromEsp32,
   scanForNearbyDevices,
@@ -26,131 +21,133 @@ import {
 } from "../../bleClient";
 import * as SecureStore from "expo-secure-store";
 import { PermissionsAndroid } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 
-// emulator helper – keep OFF on real device
 const DEV_FAKE_DEVICES = false;
+const TEST_LIMIT = 20;
+
+// Reusable Components
+const SignalBars = ({ rssi }: { rssi: number | null }) => {
+  if (!rssi) return <Text style={s.value}>—</Text>;
+  const strength = Math.min(4, Math.max(1, Math.floor((rssi + 100) / 15)));
+  
+  return (
+    <View style={s.signalBars}>
+      {[1, 2, 3, 4].map((bar) => (
+        <View
+          key={bar}
+          style={[
+            s.bar,
+            { height: bar * 4 + 4, backgroundColor: bar <= strength ? "#5cd6ff" : "#2a3b4c" }
+          ]}
+        />
+      ))}
+      <Text style={s.signalText}>{rssi} dBm</Text>
+    </View>
+  );
+};
+
+const SkeletonCard = () => (
+  <View style={[s.card, s.skeleton]}>
+    <View style={[s.skeletonLine, { width: "60%" }]} />
+    <View style={[s.skeletonLine, { width: "40%" }]} />
+    <View style={[s.skeletonLine, { width: "80%" }]} />
+  </View>
+);
+
+const IconButton = ({ name, onPress, disabled, color = "#5cd6ff", bg }: any) => (
+  <Pressable
+    onPress={onPress}
+    disabled={disabled}
+    style={[s.iconBtn, bg && { backgroundColor: bg }, disabled && s.disabled]}
+  >
+    <Ionicons name={name} size={16} color={color} />
+  </Pressable>
+);
 
 export default function DetectionsScreen() {
   const router = useRouter();
-  const { 
-    event_id: initialEventId,
-    mac: macFromParams 
-  } = useLocalSearchParams<{ event_id?: string; mac?: string }>();
+  const { event_id: initialEventId, mac: macFromParams } = useLocalSearchParams<{
+    event_id?: string;
+    mac?: string;
+  }>();
 
+  // State
   const [rows, setRows] = useState<DetectionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-
-  // text in the "Select Event" box
-  const [eventFilterInput, setEventFilterInput] = useState(
-    initialEventId ?? ""
-  );
-  // actually-applied filter
-  const [activeEventId, setActiveEventId] = useState<string | undefined>(
-    (initialEventId as string | undefined) || undefined
-  );
-
-  // MAC address filter - initialize from params
-  const [activeMacAddress, setActiveMacAddress] = useState<string | undefined>(
-    macFromParams ? String(macFromParams) : undefined
-  );
-
+  const [eventInput, setEventInput] = useState(initialEventId ?? "");
+  const [activeEventId, setActiveEventId] = useState<string | undefined>(initialEventId as string);
+  const [activeMac, setActiveMac] = useState<string | undefined>(macFromParams as string);
   const [refreshing, setRefreshing] = useState(false);
-
-  // BLE device selection state
-  const [scanningDevices, setScanningDevices] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState<SimpleBleDevice[]>(
-    DEV_FAKE_DEVICES
-      ? [
-          { id: "FAKE-ESP32-1", name: "BluStick ESP32 A" },
-          { id: "FAKE-ESP32-2", name: "BluStick ESP32 B" },
-        ]
-      : []
+    DEV_FAKE_DEVICES ? [{ id: "FAKE-1", name: "BluStick A" }] : []
   );
-  const [deviceScanError, setDeviceScanError] = useState("");
+  const [deviceError, setDeviceError] = useState("");
   const [syncing, setSyncing] = useState(false);
-  const [lastUploadedCount, setLastUploadedCount] = useState<number | null>(null);
+  const [syncStatus, setSyncStatus] = useState("");
 
-  const loadDetections = async (eventId?: string, macAddress?: string) => {
+  // Load detections
+  const loadDetections = async (eventId?: string, mac?: string) => {
     try {
       setErr("");
       if (!refreshing) setLoading(true);
 
-      console.log("[Detections] Loading with filters:", { eventId, macAddress });
-
       const data = await getDetections({
-        event_id: eventId || undefined,
-        mac_address: macAddress || undefined,
+        event_id: eventId,
+        mac_address: mac,
         limit: 200,
       });
 
-      console.log("[Detections] Loaded", data.length, "detections");
-      if (macAddress) {
-        console.log("[Detections] Filtering for MAC:", macAddress);
-        console.log("[Detections] Sample MACs:", data.slice(0, 5).map(d => d.mac_address));
-      }
-
       setRows(data);
     } catch (e: any) {
-      setErr(e?.message || "Failed to load detections");
+      setErr(e?.message || "Failed to load");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   };
 
-  // initial load
+  // Effects
   useEffect(() => {
-    console.log("[Detections] Initial mount with MAC:", activeMacAddress);
-    loadDetections(activeEventId, activeMacAddress);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadDetections(activeEventId, activeMac);
   }, []);
 
-  // Watch for MAC address changes from navigation
   useEffect(() => {
-    if (macFromParams) {
-      const macStr = String(macFromParams);
-      console.log("[Detections] MAC param changed to:", macStr);
-      if (macStr !== activeMacAddress) {
-        setActiveMacAddress(macStr);
-        loadDetections(activeEventId, macStr);
-      }
+    if (macFromParams && macFromParams !== activeMac) {
+      setActiveMac(macFromParams as string);
+      loadDetections(activeEventId, macFromParams as string);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [macFromParams]);
 
+  // Actions
   const applyFilter = () => {
-    const trimmed = eventFilterInput.trim();
-    const next = trimmed.length ? trimmed : undefined;
+    const trimmed = eventInput.trim();
+    const next = trimmed || undefined;
     setActiveEventId(next);
-    loadDetections(next, activeMacAddress);
-  };
-
-  const refresh = () => {
-    setRefreshing(true);
-    loadDetections(activeEventId, activeMacAddress);
+    loadDetections(next, activeMac);
   };
 
   const clearFilter = () => {
-    setEventFilterInput("");
+    setEventInput("");
     setActiveEventId(undefined);
-    setActiveMacAddress(undefined);
-    loadDetections(undefined, undefined);
+    setActiveMac(undefined);
+    loadDetections();
   };
 
   const viewOnMap = () => {
-    if (activeMacAddress) {
-      router.push({
-        pathname: "/(tabs)/map",
-        params: { mac: activeMacAddress },
-      });
+    if (!activeMac) {
+      Alert.alert("No Device", "Select a MAC address first");
+      return;
     }
+    router.push({ pathname: "/(tabs)/map" as any, params: { mac: activeMac } });
   };
 
-  const startDeviceScan = async () => {
+  const startScan = async () => {
     try {
-      setDeviceScanError("");
-      setScanningDevices(true);
+      setDeviceError("");
+      setScanning(true);
 
       if (Platform.OS === "android" && Platform.Version >= 31) {
         const granted = await PermissionsAndroid.requestMultiple([
@@ -159,679 +156,339 @@ export default function DetectionsScreen() {
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         ]);
 
-        const allGranted = Object.values(granted).every(
-          (value) => value === PermissionsAndroid.RESULTS.GRANTED
-        );
-
-        if (!allGranted) {
-          setDeviceScanError("Bluetooth permissions not granted.");
-          setScanningDevices(false);
+        if (!Object.values(granted).every((v) => v === "granted")) {
+          setDeviceError("Permissions denied");
           return;
         }
       }
 
       if (DEV_FAKE_DEVICES) {
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await new Promise((r) => setTimeout(r, 800));
         return;
       }
 
-      setDevices([]);
       const list = await scanForNearbyDevices(8000);
       setDevices(list);
-
-      if (list.length === 0) {
-        setDeviceScanError("No BLE devices found nearby.");
-      }
+      if (!list.length) setDeviceError("No devices found");
     } catch (e: any) {
-      console.warn(e);
-      setDeviceScanError(e?.message || "Failed to scan for devices");
+      setDeviceError(e?.message || "Scan failed");
     } finally {
-      setScanningDevices(false);
+      setScanning(false);
     }
   };
 
-// Replace syncFromSelectedDevice in detections.tsx
-// This version limits uploads to 20 detections for testing
-
-const syncFromSelectedDevice = async (deviceId: string) => {
-  try {
-    if (DEV_FAKE_DEVICES) {
-      console.log("DEV: pretend syncing from", deviceId);
-      Alert.alert("Success", "1 detection uploaded (dev mode)");
-      return;
-    }
-
-    setSyncing(true);
-    setErr("");
-
-    console.log("=== [UI] Starting Sync Process ===");
-
-    const token = await SecureStore.getItemAsync("token");
-    if (!token) {
-      console.error("[UI] ❌ No JWT token found");
-      Alert.alert("Error", "Not authenticated. Please log in.");
-      return;
-    }
-    console.log("[UI] ✅ Token found");
-
-    console.log("[UI] Connecting to device:", deviceId);
-
-    const batch = await collectDetectionsFromEsp32(
-      activeEventId ?? null,
-      30000,
-      { deviceId }
-    );
-
-    console.log("[UI] ✅ Collected", batch.length, "detections from ESP32");
-
-    if (!batch.length) {
-      console.log("[UI] No detections to upload");
-      Alert.alert("Info", "No detections received from device.");
-      setDevices([]);
-      return;
-    }
-
-    // 🧪 TESTING: Limit to first 20 detections
-    const TEST_LIMIT = 20;
-    const limitedBatch = batch.slice(0, TEST_LIMIT);
-    
-    if (batch.length > TEST_LIMIT) {
-      console.log(`[UI] 🧪 TEST MODE: Limiting upload to ${TEST_LIMIT} detections (collected ${batch.length})`);
-    }
-
-    // Show all detections we're uploading
-    console.log(`[UI] Uploading ${limitedBatch.length} detections:`);
-    limitedBatch.forEach((d, i) => {
-      console.log(`  [${i}]:`, JSON.stringify(d));
-    });
-
-    console.log("[UI] Uploading to backend...");
-
+  const syncDevice = async (deviceId: string) => {
     try {
-      const result = await createDetectionsBatch(limitedBatch);
-      
-      console.log("[UI] ✅ Upload successful!");
-      console.log("[UI] Result:", JSON.stringify(result));
-
-      setLastUploadedCount(limitedBatch.length);
-
-      // Show different message if we limited the upload
-      const message = batch.length > TEST_LIMIT
-        ? `TEST: Uploaded ${limitedBatch.length} of ${batch.length} detections successfully!\n\n(Limited for testing)`
-        : `${limitedBatch.length} detection${limitedBatch.length === 1 ? "" : "s"} uploaded successfully!`;
-
-      Alert.alert("Success", message);
-
-      // Refresh the list
-      await loadDetections(activeEventId, activeMacAddress);
-      setDevices([]);
-
-    } catch (uploadError: any) {
-      console.error("[UI] ❌ Upload failed");
-      console.error("[UI] Upload error:", uploadError);
-      throw uploadError;
-    }
-
-  } catch (e: any) {
-    console.error("=== [UI] ❌ Sync Failed ===");
-    console.error("[UI] Error type:", e?.constructor?.name);
-    console.error("[UI] Error message:", e?.message);
-    console.error("[UI] Error stack:", e?.stack);
-    
-    // Create detailed error message
-    let errorMsg = "Failed to sync from device";
-    
-    if (e?.message) {
-      if (e.message.includes("401") || e.message.includes("auth")) {
-        errorMsg = "Authentication error. Please log in again.";
-      } else if (e.message.includes("Network")) {
-        errorMsg = "Network error. Check your connection.";
-      } else if (e.message.includes("timeout")) {
-        errorMsg = "Connection timeout. Try again.";
-      } else {
-        errorMsg = e.message;
+      if (DEV_FAKE_DEVICES) {
+        Alert.alert("Success", "Dev mode sync");
+        return;
       }
+
+      setSyncing(true);
+      setSyncStatus("Connecting...");
+
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        Alert.alert("Error", "Not authenticated");
+        return;
+      }
+
+      setSyncStatus("Collecting...");
+      const batch = await collectDetectionsFromEsp32(activeEventId ?? null, 30000, { deviceId });
+
+      if (!batch.length) {
+        Alert.alert("Info", "No detections");
+        setDevices([]);
+        return;
+      }
+
+      const limited = batch.slice(0, TEST_LIMIT);
+      setSyncStatus(`Uploading ${limited.length}...`);
+
+      await createDetectionsBatch(limited);
+      
+      const msg = batch.length > TEST_LIMIT
+        ? `TEST: Uploaded ${limited.length}/${batch.length}`
+        : `${limited.length} uploaded!`;
+      
+      Alert.alert("Success", msg);
+      await loadDetections(activeEventId, activeMac);
+      setDevices([]);
+    } catch (e: any) {
+      const msg = e?.message?.includes("401") ? "Auth error" :
+                  e?.message?.includes("Network") ? "Network error" :
+                  e?.message || "Sync failed";
+      Alert.alert("Sync Failed", msg);
+      setErr(msg);
+    } finally {
+      setSyncing(false);
+      setSyncStatus("");
     }
-    
-    Alert.alert(
-      "Sync Failed",
-      errorMsg + "\n\nCheck console logs for details."
-    );
-    
-    setErr(errorMsg);
-  } finally {
-    setSyncing(false);
-  }
-};
+  };
 
-  const mono = Platform.select({ ios: "Menlo", android: "monospace" }) as any;
-
-  const renderDetectionItem = React.useCallback(({ item }: { item: DetectionRow }) => {
-    const monoFont = Platform.select({ ios: "Menlo", android: "monospace" }) as any;
-    
-    return (
-      <View style={s.card}>
-        <View style={s.cardHeader}>
-          <Text style={[s.mac, { fontFamily: monoFont }]}>
-            {item.mac_address ?? "(unknown)"}
-          </Text>
-          {item.signal_type && (
-            <View style={s.badge}>
-              <Text style={s.badgeText}>{item.signal_type}</Text>
-            </View>
-          )}
-        </View>
-
-        <View style={s.detailsGrid}>
-          <View style={s.detailItem}>
-            <Text style={s.detailLabel}>RSSI</Text>
-            <Text style={s.detailValue}>
-              {item.rssi ?? "–"} dBm
-            </Text>
-          </View>
-          <View style={s.detailItem}>
-            <Text style={s.detailLabel}>Distance</Text>
-            <Text style={s.detailValue}>
-              {item.estimated_distance != null
-                ? `${item.estimated_distance.toFixed(2)} m`
-                : "–"}
-            </Text>
-          </View>
-        </View>
-
-        <View style={s.detailsGrid}>
-          <View style={s.detailItem}>
-            <Text style={s.detailLabel}>Latitude</Text>
-            <Text style={s.detailValue}>{item.latitude ?? "–"}</Text>
-          </View>
-          <View style={s.detailItem}>
-            <Text style={s.detailLabel}>Longitude</Text>
-            <Text style={s.detailValue}>{item.longitude ?? "–"}</Text>
-          </View>
-        </View>
-
-        <Text style={s.time}>
-          {new Date(item.detected_at).toLocaleString()}
+  // Render helpers
+  const renderDetection = useCallback(({ item }: { item: DetectionRow }) => (
+    <View style={s.card}>
+      <View style={s.row}>
+        <Text style={[s.mac, { fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) }]}>
+          {item.mac_address ?? "unknown"}
         </Text>
+        {item.signal_type && (
+          <View style={s.badge}>
+            <Text style={s.badgeText}>{item.signal_type}</Text>
+          </View>
+        )}
       </View>
-    );
-  }, []);
 
-  const keyExtractor = React.useCallback(
-    (item: DetectionRow, idx: number) => {
-      // Create a unique key using multiple fields to avoid collisions
-      const id = item.blustick_id || 'no-id';
-      const mac = item.mac_address || 'no-mac';
-      const time = item.detected_at || 'no-time';
-      const lat = item.latitude || 'no-lat';
-      const lng = item.longitude || 'no-lng';
-      return `detection-${id}-${mac}-${time}-${lat}-${lng}-${idx}`;
-    },
+      <View style={s.grid}>
+        <View style={s.gridItem}>
+          <Text style={s.label}>SIGNAL</Text>
+          <SignalBars rssi={item.rssi} />
+        </View>
+        <View style={s.gridItem}>
+          <Text style={s.label}>DISTANCE</Text>
+          <Text style={s.value}>
+            {item.estimated_distance ? `${item.estimated_distance.toFixed(2)} m` : "—"}
+          </Text>
+        </View>
+      </View>
+
+      <View style={s.grid}>
+        <View style={s.gridItem}>
+          <Text style={s.label}>LAT</Text>
+          <Text style={s.value}>{item.latitude?.toFixed(6) ?? "—"}</Text>
+        </View>
+        <View style={s.gridItem}>
+          <Text style={s.label}>LNG</Text>
+          <Text style={s.value}>{item.longitude?.toFixed(6) ?? "—"}</Text>
+        </View>
+      </View>
+
+      <View style={s.timeRow}>
+        <Ionicons name="time-outline" size={12} color="#7f8a99" />
+        <Text style={s.time}>{new Date(item.detected_at).toLocaleString()}</Text>
+      </View>
+    </View>
+  ), []);
+
+  const keyExtractor = useCallback(
+    (item: DetectionRow, idx: number) =>
+      `${item.blustick_id}-${item.mac_address}-${item.detected_at}-${idx}`,
     []
   );
 
-  const renderSeparator = React.useCallback(() => <View style={{ height: 8 }} />, []);
-
   return (
     <SafeAreaView style={s.root}>
-      <View style={s.headerLine} />
-      <View style={s.content}>
-        {DEV_FAKE_DEVICES && (
-          <View style={s.devBadge}>
-            <Text style={s.devBadgeText}>DEV BLE FAKE MODE</Text>
-          </View>
-        )}
-
-        {/* Filter controls */}
-        <View style={s.filterContainer}>
-          <Text style={s.filterSectionLabel}>Event Filter</Text>
-          <View style={s.filterInputRow}>
-            <TextInput
-              style={s.filterInput}
-              value={eventFilterInput}
-              onChangeText={setEventFilterInput}
-              placeholder="Enter event ID (optional)"
-              placeholderTextColor="#9aa4b2"
-            />
-            <Pressable onPress={applyFilter} style={s.filterButton}>
-              <Text style={s.filterButtonText}>Apply</Text>
-            </Pressable>
-          </View>
-
-          {/* Primary actions row */}
-          <View style={s.actionRow}>
-            <Pressable
-              onPress={startDeviceScan}
-              disabled={scanningDevices || syncing}
-              style={[
-                s.syncBtn,
-                (scanningDevices || syncing) && { opacity: 0.6 },
-              ]}
-            >
-              <Text style={s.syncText}>
-                {scanningDevices
-                  ? "Scanning…"
-                  : syncing
-                  ? "Syncing…"
-                  : "Sync"}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={refresh}
-              disabled={refreshing}
-              style={[s.refreshBtn, refreshing && { opacity: 0.6 }]}
-            >
-              <Text style={s.refreshText}>
-                {refreshing ? "↻" : "↻"}
-              </Text>
-            </Pressable>
-
-            {activeMacAddress && (
-              <Pressable onPress={viewOnMap} style={s.mapBtn}>
-                <Text style={s.mapText}>📍</Text>
-              </Pressable>
-            )}
-
-            {(activeEventId || activeMacAddress) && (
-              <Pressable onPress={clearFilter} style={s.clearBtn}>
-                <Text style={s.clearText}>✕</Text>
-              </Pressable>
-            )}
-          </View>
-        </View>
-
-        {/* Device picker area */}
-        <View style={s.deviceSection}>
-          <Text style={s.deviceTitle}>Nearby devices</Text>
-
-          {scanningDevices ? (
-            <View style={s.centerRow}>
-              <ActivityIndicator size="small" color="#5cd6ff" />
-              <Text style={[s.deviceInfoText, { marginLeft: 8 }]}>
-                Scanning…
-              </Text>
-            </View>
-          ) : deviceScanError ? (
-            <Text style={s.deviceError}>{deviceScanError}</Text>
-          ) : devices.length === 0 ? (
-            <Text style={s.deviceInfoText}>
-              Tap &quot;Sync from device&quot; to scan for ESP32 units.
-            </Text>
-          ) : (
-            <ScrollView style={s.deviceList} nestedScrollEnabled>
-              {devices.map((d) => (
-                <Pressable
-                  key={d.id}
-                  style={s.deviceItem}
-                  onPress={() => syncFromSelectedDevice(d.id)}
-                  disabled={syncing}
-                >
-                  <View>
-                    <Text style={s.deviceName}>{d.name ?? "(unnamed)"}</Text>
-                    <Text style={s.deviceId}>{d.id}</Text>
-                  </View>
-                  <Text style={s.deviceSyncLabel}>
-                    {syncing ? "…" : "Sync"}
-                  </Text>
+      <View style={s.divider} />
+      
+      <FlatList
+        data={rows}
+        keyExtractor={keyExtractor}
+        renderItem={renderDetection}
+        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+        contentContainerStyle={s.content}
+        removeClippedSubviews
+        maxToRenderPerBatch={10}
+        initialNumToRender={10}
+        windowSize={10}
+        ListHeaderComponent={
+          <>
+            {/* Filter */}
+            <View style={s.section}>
+              <Text style={s.sectionLabel}>EVENT FILTER</Text>
+              <View style={s.inputRow}>
+                <TextInput
+                  style={s.input}
+                  value={eventInput}
+                  onChangeText={setEventInput}
+                  placeholder="Event ID (optional)"
+                  placeholderTextColor="#9aa4b2"
+                />
+                <Pressable onPress={applyFilter} style={s.applyBtn}>
+                  <Text style={s.applyText}>Apply</Text>
                 </Pressable>
-              ))}
-            </ScrollView>
-          )}
-        </View>
+              </View>
 
-        {/* Status indicator */}
-        <View style={s.statusBar}>
-          <Text style={s.statusText}>
-            {activeMacAddress ? (
-              <>
-                MAC:{" "}
-                <Text style={s.statusHighlight}>{activeMacAddress}</Text>
-                {activeEventId && (
-                  <>
-                    {" | "}Event: <Text style={s.statusHighlight}>{activeEventId}</Text>
-                  </>
-                )}
-              </>
-            ) : activeEventId ? (
-              <>
-                Event:{" "}
-                <Text style={s.statusHighlight}>{activeEventId}</Text>
-              </>
-            ) : (
-              "Showing all detections"
+              {/* Actions */}
+              <View style={s.actions}>
+                <Pressable
+                  onPress={startScan}
+                  disabled={scanning || syncing}
+                  style={[s.syncBtn, (scanning || syncing) && s.disabled]}
+                >
+                  <Ionicons name="bluetooth" size={16} color="#0b1420" />
+                  <Text style={s.syncText}>{scanning ? "Scanning" : "Sync"}</Text>
+                </Pressable>
+
+                <IconButton name="refresh" onPress={() => { setRefreshing(true); loadDetections(activeEventId, activeMac); }} disabled={refreshing} />
+                {activeMac && <IconButton name="map" onPress={viewOnMap} />}
+                {(activeEventId || activeMac) && <IconButton name="close" onPress={clearFilter} color="#ff6b6b" />}
+              </View>
+            </View>
+
+            {/* Sync Status */}
+            {syncStatus && (
+              <View style={s.statusBar}>
+                <ActivityIndicator size="small" color="#5cd6ff" />
+                <Text style={s.statusText}>{syncStatus}</Text>
+              </View>
             )}
-          </Text>
-          <Text style={s.countText}>{rows.length} detections</Text>
-        </View>
 
-        {/* Body */}
-        {loading ? (
-          <View style={s.center}>
-            <ActivityIndicator size="large" color="#5cd6ff" />
-          </View>
-        ) : err ? (
-          <View style={s.center}>
-            <Text style={s.err}>{err}</Text>
-          </View>
-        ) : rows.length === 0 ? (
-          <View style={s.center}>
-            <Text style={s.empty}>No detections found</Text>
-          </View>
-        ) : (
-          <FlatList
-            data={rows}
-            keyExtractor={keyExtractor}
-            renderItem={renderDetectionItem}
-            ItemSeparatorComponent={renderSeparator}
-            contentContainerStyle={{ paddingBottom: 24 }}
-            removeClippedSubviews={true}
-            maxToRenderPerBatch={10}
-            updateCellsBatchingPeriod={50}
-            initialNumToRender={10}
-            windowSize={10}
-          />
-        )}
-      </View>
+            {/* Devices */}
+            <View style={s.section}>
+              <View style={s.row}>
+                <Ionicons name="hardware-chip-outline" size={18} color="#5cd6ff" />
+                <Text style={s.sectionTitle}>Nearby Devices</Text>
+              </View>
+
+              {scanning ? (
+                <View style={s.center}>
+                  <ActivityIndicator size="small" color="#5cd6ff" />
+                  <Text style={s.info}>Scanning...</Text>
+                </View>
+              ) : deviceError ? (
+                <View style={s.errorBox}>
+                  <Ionicons name="alert-circle-outline" size={20} color="#ff6b6b" />
+                  <Text style={s.errorText}>{deviceError}</Text>
+                </View>
+              ) : !devices.length ? (
+                <View style={s.empty}>
+                  <Ionicons name="bluetooth-outline" size={32} color="#3a4b5c" />
+                  <Text style={s.info}>Tap "Sync" to scan</Text>
+                </View>
+              ) : (
+                devices.map((d) => (
+                  <Pressable
+                    key={d.id}
+                    style={s.device}
+                    onPress={() => syncDevice(d.id)}
+                    disabled={syncing}
+                  >
+                    <View style={s.deviceIcon}>
+                      <Ionicons name="hardware-chip" size={24} color="#5cd6ff" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.deviceName}>{d.name ?? "unnamed"}</Text>
+                      <Text style={s.deviceId}>{d.id}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="#9aa4b2" />
+                  </Pressable>
+                ))
+              )}
+            </View>
+
+            {/* Status */}
+            <View style={s.status}>
+              <View style={s.row}>
+                <Ionicons name={activeMac ? "filter" : "list"} size={14} color="#9aa4b2" />
+                <Text style={s.statusLabel}>
+                  {activeMac ? (
+                    <Text style={s.highlight}>{activeMac}</Text>
+                  ) : activeEventId ? (
+                    <Text style={s.highlight}>{activeEventId}</Text>
+                  ) : (
+                    "All detections"
+                  )}
+                </Text>
+              </View>
+              <View style={s.count}>
+                <Text style={s.countText}>{rows.length}</Text>
+              </View>
+            </View>
+          </>
+        }
+        ListEmptyComponent={
+          loading ? (
+            <>
+              <SkeletonCard />
+              <SkeletonCard />
+              <SkeletonCard />
+            </>
+          ) : err ? (
+            <View style={s.center}>
+              <Ionicons name="alert-circle-outline" size={48} color="#ff6b6b" />
+              <Text style={s.errorText}>{err}</Text>
+              <Pressable onPress={() => loadDetections(activeEventId, activeMac)} style={s.retryBtn}>
+                <Text style={s.retryText}>Try Again</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={s.center}>
+              <Ionicons name="radio-outline" size={64} color="#3a4b5c" />
+              <Text style={s.emptyTitle}>No Detections</Text>
+              <Text style={s.info}>Sync your device to start</Text>
+              <Pressable onPress={startScan} style={s.syncBtn}>
+                <Text style={s.syncText}>Scan Devices</Text>
+              </Pressable>
+            </View>
+          )
+        }
+      />
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#0b1420" },
-  headerLine: { height: 1, backgroundColor: "rgba(92,214,255,0.12)" },
-  content: { flex: 1, padding: 16 },
-
-  devBadge: {
-    alignSelf: "flex-start",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    backgroundColor: "rgba(255,215,0,0.1)",
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "rgba(255,215,0,0.4)",
-    marginBottom: 8,
-  },
-  devBadgeText: {
-    color: "#ffd700",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-
-  filterContainer: {
-    marginBottom: 12,
-  },
-
-  filterSectionLabel: {
-    color: "#9aa4b2",
-    fontSize: 11,
-    marginBottom: 6,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-
-  filterInputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#0f1a2a",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.25)",
-    borderRadius: 10,
-    paddingLeft: 12,
-    marginBottom: 8,
-    height: 48,
-  },
-
-  filterInput: {
-    flex: 1,
-    color: "#e6edf5",
-    fontSize: 14,
-    height: "100%",
-  },
-
-  filterButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    backgroundColor: "#23b8f0",
-    borderTopRightRadius: 9,
-    borderBottomRightRadius: 9,
-    justifyContent: "center",
-    alignItems: "center",
-    height: "100%",
-  },
-
-  filterButtonText: {
-    color: "#0b1420",
-    fontWeight: "700",
-    fontSize: 14,
-  },
-
-  actionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    marginTop: 6,
-    gap: 8,
-  },
-
-  clearBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "rgba(255,107,107,0.1)",
-    borderWidth: 1,
-    borderColor: "rgba(255,107,107,0.3)",
-  },
-
-  clearText: {
-    color: "#ff6b6b",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-
-  syncBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#23b8f0",
-  },
-
-  syncText: {
-    color: "#0b1420",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-
-  refreshBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.4)",
-    backgroundColor: "rgba(35,184,240,0.08)",
-  },
-
-  refreshText: {
-    color: "#5cd6ff",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-
-  mapBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "rgba(35,184,240,0.15)",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.4)",
-  },
-
-  mapText: {
-    color: "#5cd6ff",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-
-  deviceSection: {
-    marginBottom: 12,
-    padding: 10,
-    borderRadius: 10,
-    backgroundColor: "rgba(10,18,32,0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.18)",
-  },
-
-  deviceTitle: {
-    color: "#c9d5e3",
-    fontSize: 13,
-    fontWeight: "600",
-    marginBottom: 6,
-  },
-
-  deviceInfoText: {
-    color: "#9aa4b2",
-    fontSize: 12,
-  },
-
-  deviceError: {
-    color: "#ff6b6b",
-    fontSize: 12,
-  },
-
-  deviceList: {
-    marginTop: 6,
-    maxHeight: 200,
-  },
-
-  deviceItem: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-    backgroundColor: "rgba(18,28,44,0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.25)",
-    marginBottom: 6,
-  },
-
-  deviceName: {
-    color: "#e6edf5",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-
-  deviceId: {
-    color: "#7f8a99",
-    fontSize: 11,
-  },
-
-  deviceSyncLabel: {
-    color: "#5cd6ff",
-    fontWeight: "700",
-    fontSize: 13,
-  },
-
-  centerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  statusBar: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: "rgba(18,28,44,0.6)",
-    borderRadius: 8,
-    marginBottom: 12,
-  },
-
-  statusText: {
-    color: "#9aa4b2",
-    fontSize: 12,
-  },
-
-  statusHighlight: {
-    color: "#5cd6ff",
-    fontWeight: "600",
-  },
-
-  countText: {
-    color: "#c9d5e3",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-
-  center: { paddingVertical: 24, alignItems: "center" },
-  err: { color: "#ff6b6b" },
-  empty: { color: "#9aa4b2" },
-
-  card: {
-    backgroundColor: "rgba(18,28,44,0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.18)",
-    borderRadius: 10,
-    padding: 12,
-  },
-
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 10,
-  },
-
-  mac: {
-    color: "#e6edf5",
-    fontWeight: "700",
-    fontSize: 14,
-  },
-
-  badge: {
-    backgroundColor: "rgba(35,184,240,0.15)",
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.3)",
-  },
-
-  badgeText: {
-    color: "#5cd6ff",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-
-  detailsGrid: {
-    flexDirection: "row",
-    marginBottom: 8,
-  },
-
-  detailItem: {
-    flex: 1,
-  },
-
-  detailLabel: {
-    color: "#7f8a99",
-    fontSize: 10,
-    marginBottom: 3,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-
-  detailValue: {
-    color: "#c9d5e3",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-
-  time: {
-    color: "#7f8a99",
-    marginTop: 4,
-    fontSize: 11,
-    fontStyle: "italic",
-  },
+  divider: { height: 1, backgroundColor: "rgba(92,214,255,0.12)" },
+  content: { padding: 16 },
+  
+  section: { marginBottom: 12, padding: 12, borderRadius: 10, backgroundColor: "rgba(10,18,32,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.18)" },
+  sectionLabel: { color: "#9aa4b2", fontSize: 11, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 },
+  sectionTitle: { color: "#c9d5e3", fontSize: 13, fontWeight: "600" },
+  
+  inputRow: { flexDirection: "row", backgroundColor: "#0f1a2a", borderWidth: 1, borderColor: "rgba(92,214,255,0.25)", borderRadius: 10, height: 48, marginBottom: 8 },
+  input: { flex: 1, color: "#e6edf5", fontSize: 14, paddingLeft: 12 },
+  applyBtn: { paddingHorizontal: 20, backgroundColor: "#23b8f0", borderTopRightRadius: 9, borderBottomRightRadius: 9, justifyContent: "center" },
+  applyText: { color: "#0b1420", fontWeight: "700", fontSize: 14 },
+  
+  actions: { flexDirection: "row", gap: 8, justifyContent: "flex-end" },
+  syncBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: "#23b8f0" },
+  syncText: { color: "#0b1420", fontSize: 13, fontWeight: "700" },
+  iconBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.4)", backgroundColor: "rgba(35,184,240,0.08)" },
+  disabled: { opacity: 0.6 },
+  
+  statusBar: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "rgba(92,214,255,0.1)", paddingHorizontal: 12, paddingVertical: 10, borderRadius: 8, marginBottom: 12, borderWidth: 1, borderColor: "rgba(92,214,255,0.25)" },
+  statusText: { color: "#5cd6ff", fontSize: 13, fontWeight: "600" },
+  
+  device: { flexDirection: "row", alignItems: "center", padding: 12, borderRadius: 8, backgroundColor: "rgba(18,28,44,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.25)", marginTop: 8, gap: 12 },
+  deviceIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(92,214,255,0.1)", alignItems: "center", justifyContent: "center" },
+  deviceName: { color: "#e6edf5", fontSize: 14, fontWeight: "600" },
+  deviceId: { color: "#7f8a99", fontSize: 11 },
+  
+  status: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10, backgroundColor: "rgba(18,28,44,0.6)", borderRadius: 8, marginBottom: 12 },
+  statusLabel: { color: "#9aa4b2", fontSize: 12, flex: 1 },
+  highlight: { color: "#5cd6ff", fontWeight: "600" },
+  count: { backgroundColor: "rgba(92,214,255,0.15)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)" },
+  countText: { color: "#5cd6ff", fontSize: 12, fontWeight: "700" },
+  
+  card: { backgroundColor: "rgba(18,28,44,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.18)", borderRadius: 10, padding: 12 },
+  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  mac: { color: "#e6edf5", fontWeight: "700", fontSize: 14 },
+  badge: { backgroundColor: "rgba(35,184,240,0.15)", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)" },
+  badgeText: { color: "#5cd6ff", fontSize: 11, fontWeight: "700" },
+  
+  grid: { flexDirection: "row", marginBottom: 10, gap: 12 },
+  gridItem: { flex: 1 },
+  label: { color: "#7f8a99", fontSize: 10, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
+  value: { color: "#c9d5e3", fontSize: 14, fontWeight: "600" },
+  
+  signalBars: { flexDirection: "row", alignItems: "center", gap: 8 },
+  bar: { width: 3, borderRadius: 1.5 },
+  signalText: { color: "#c9d5e3", fontSize: 12, fontWeight: "600" },
+  
+  timeRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 },
+  time: { color: "#7f8a99", fontSize: 11, fontStyle: "italic" },
+  
+  skeleton: { opacity: 0.5 },
+  skeletonLine: { height: 12, backgroundColor: "rgba(92,214,255,0.1)", borderRadius: 4, marginBottom: 8 },
+  
+  center: { alignItems: "center", paddingVertical: 40, gap: 12 },
+  empty: { alignItems: "center", paddingVertical: 16, gap: 8 },
+  info: { color: "#9aa4b2", fontSize: 12 },
+  errorBox: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10, backgroundColor: "rgba(255,107,107,0.1)", borderRadius: 8 },
+  errorText: { color: "#ff6b6b", fontSize: 12, flex: 1 },
+  retryBtn: { marginTop: 8, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: "rgba(92,214,255,0.1)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)" },
+  retryText: { color: "#5cd6ff", fontWeight: "600", fontSize: 14 },
+  emptyTitle: { color: "#e6edf5", fontSize: 18, fontWeight: "700", marginTop: 8 },
 });
