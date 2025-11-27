@@ -1,5 +1,5 @@
-// app/(tabs)/eventlogs.tsx - Simplified version
-import React, { useEffect, useState } from "react";
+// app/(tabs)/eventlogs.tsx - With Search Mode
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -17,7 +17,7 @@ import { useRouter } from "expo-router";
 import { getDeviceMacSummaries, DeviceMacSummary } from "../../api";
 import { Ionicons } from "@expo/vector-icons";
 
-type TimeFilter = 'all' | 'hour' | 'day' | 'week';
+type TimeFilter = 'all' | 'search';
 
 // Header stats component
 const HeaderStats = ({ 
@@ -55,14 +55,14 @@ const EmptyState = ({ hasFilters, onClear }: { hasFilters: boolean; onClear: () 
       color="#3a4b5c" 
     />
     <Text style={s.emptyTitle}>
-      {hasFilters ? "No Results" : "No Devices Yet"}
+      {hasFilters ? "No Recent Devices" : "No Devices Yet"}
     </Text>
     <Text style={s.emptySubtitle}>
-      {hasFilters ? "Try adjusting your filters" : "Start tracking by syncing your BluStick device"}
+      {hasFilters ? "No devices detected in the last 10 minutes" : "Start tracking by syncing your BluStick device"}
     </Text>
     {hasFilters && (
       <Pressable onPress={onClear} style={s.actionBtn}>
-        <Text style={s.actionBtnText}>Clear Filters</Text>
+        <Text style={s.actionBtnText}>View All Devices</Text>
       </Pressable>
     )}
   </View>
@@ -89,6 +89,8 @@ export default function EventLogsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('all');
+  
+  const autoRefreshInterval = useRef<NodeJS.Timeout | null>(null);
 
   const loadRows = async () => {
     try {
@@ -125,20 +127,38 @@ export default function EventLogsScreen() {
       );
     }
 
-    if (time !== 'all') {
-      const cutoffs = {
-        hour: 60 * 60 * 1000,
-        day: 24 * 60 * 60 * 1000,
-        week: 7 * 24 * 60 * 60 * 1000,
-      };
-      const now = Date.now();
+    if (time === 'search') {
+      const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
       filtered = filtered.filter(row => 
-        new Date(row.last_seen).getTime() > now - cutoffs[time]
+        new Date(row.last_seen).getTime() > tenMinutesAgo
       );
     }
 
     setFilteredRows(filtered);
   };
+
+  // Setup auto-refresh when in Search Mode
+  useEffect(() => {
+    if (timeFilter === 'search') {
+      // Refresh every 10 seconds when in search mode
+      autoRefreshInterval.current = setInterval(() => {
+        loadRows();
+      }, 10000);
+    } else {
+      // Clear interval when not in search mode
+      if (autoRefreshInterval.current) {
+        clearInterval(autoRefreshInterval.current);
+        autoRefreshInterval.current = null;
+      }
+    }
+
+    // Cleanup on unmount
+    return () => {
+      if (autoRefreshInterval.current) {
+        clearInterval(autoRefreshInterval.current);
+      }
+    };
+  }, [timeFilter]);
 
   useEffect(() => {
     loadRows();
@@ -163,20 +183,18 @@ export default function EventLogsScreen() {
   const totalDevices = allRows.length;
   const totalDetections = allRows.reduce((sum, row) => sum + row.detection_count, 0);
   const recentCount = allRows.filter(row => 
-    new Date(row.last_seen).getTime() > Date.now() - 60 * 60 * 1000
+    new Date(row.last_seen).getTime() > Date.now() - (10 * 60 * 1000)
   ).length;
 
-  const hasFilters = searchQuery.trim() !== "" || timeFilter !== 'all';
+  const hasFilters = searchQuery.trim() !== "" || timeFilter === 'search';
   const clearFilters = () => {
     setSearchQuery("");
     setTimeFilter('all');
   };
 
-  const timeFilters: { value: TimeFilter; label: string }[] = [
-    { value: 'all', label: 'All' },
-    { value: 'hour', label: 'Last Hour' },
-    { value: 'day', label: 'Today' },
-    { value: 'week', label: 'This Week' },
+  const timeFilters: { value: TimeFilter; label: string; icon: string }[] = [
+    { value: 'all', label: 'All', icon: 'list' },
+    { value: 'search', label: 'Search Mode', icon: 'scan' },
   ];
 
   return (
@@ -210,7 +228,7 @@ export default function EventLogsScreen() {
         </View>
       </View>
 
-      {/* Quick Filters */}
+      {/* Mode Toggle */}
       <View style={s.filterChipsContainer}>
         {timeFilters.map((filter) => (
           <Pressable 
@@ -218,6 +236,11 @@ export default function EventLogsScreen() {
             onPress={() => setTimeFilter(filter.value)}
             style={[s.filterChip, timeFilter === filter.value && s.filterChipActive]}
           >
+            <Ionicons 
+              name={filter.icon as any} 
+              size={14} 
+              color={timeFilter === filter.value ? "#0b1420" : "#5cd6ff"} 
+            />
             <Text style={[s.filterChipText, timeFilter === filter.value && s.filterChipTextActive]}>
               {filter.label}
             </Text>
@@ -225,7 +248,7 @@ export default function EventLogsScreen() {
         ))}
       </View>
 
-      {/* Results Count */}
+      {/* Results Count with Auto-refresh indicator */}
       {!loading && !error && (
         <View style={s.resultsBar}>
           <Text style={s.resultsText}>
@@ -234,6 +257,12 @@ export default function EventLogsScreen() {
               : `${filteredRows.length} of ${allRows.length} device${allRows.length === 1 ? '' : 's'}`
             }
           </Text>
+          {timeFilter === 'search' && (
+            <View style={s.autoRefreshBadge}>
+              <View style={s.pulseDot} />
+              <Text style={s.autoRefreshText}>Auto-refreshing</Text>
+            </View>
+          )}
         </View>
       )}
 
@@ -250,7 +279,7 @@ export default function EventLogsScreen() {
           </Pressable>
         </View>
       ) : filteredRows.length === 0 ? (
-        <EmptyState hasFilters={hasFilters} onClear={clearFilters} />
+        <EmptyState hasFilters={timeFilter === 'search'} onClear={clearFilters} />
       ) : (
         <FlatList
           data={filteredRows}
@@ -377,17 +406,19 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    gap: 8,
+    gap: 12,
   },
   filterChip: {
     flex: 1,
-    minWidth: 70,
-    paddingVertical: 10,
-    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: "rgba(92,214,255,0.3)",
     backgroundColor: "rgba(35,184,240,0.08)",
-    alignItems: 'center',
   },
   filterChipActive: {
     backgroundColor: "#5cd6ff",
@@ -395,7 +426,7 @@ const s = StyleSheet.create({
   },
   filterChipText: {
     color: "#5cd6ff",
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "600",
   },
   filterChipTextActive: {
@@ -403,12 +434,37 @@ const s = StyleSheet.create({
     fontWeight: "700",
   },
   resultsBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingBottom: 8,
   },
   resultsText: {
     color: "#9aa4b2",
     fontSize: 12,
+    fontWeight: "600",
+  },
+  autoRefreshBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: "rgba(92,214,255,0.1)",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.3)",
+  },
+  pulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#5cd6ff",
+  },
+  autoRefreshText: {
+    color: "#5cd6ff",
+    fontSize: 10,
     fontWeight: "600",
   },
   centerContainer: {

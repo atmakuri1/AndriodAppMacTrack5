@@ -16,7 +16,10 @@ import {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+
+// ⚠️ IMPORTANT: Increase JSON body size limit to fix HTTP 413 errors
+app.use(express.json({ limit: '10mb' }));
+
 app.use(detectionRouter);
 
 
@@ -141,32 +144,32 @@ app.get("/events", async (req, res) => {
 // ========= DETECTIONS =========
 // GET /detections?event_id=<uuid>&limit=200
 // Returns newest first; filters by event if provided.
-app.get("/detections", async (req, res) => {
-  const auth = requireJwt(req, res);
-  if (!auth.ok) return;
+// app.get("/detections", async (req, res) => {
+//   const auth = requireJwt(req, res);
+//   if (!auth.ok) return;
 
-  const limit = Math.min(
-    parseInt(String(req.query.limit ?? "200"), 10) || 200,
-    1000
-  );
-  const eventId = (req.query.event_id as string | undefined) || undefined;
+//   const limit = Math.min(
+//     parseInt(String(req.query.limit ?? "200"), 10) || 200,
+//     1000
+//   );
+//   const eventId = (req.query.event_id as string | undefined) || undefined;
 
-  let sql = `
-    SELECT blustick_id, event_id, mac_address, signal_type, rssi,
-           estimated_distance, latitude, longitude, detected_at
-    FROM detections
-  `;
-  const params: any[] = [];
-  if (eventId) {
-    sql += ` WHERE event_id = $1`;
-    params.push(eventId);
-  }
-  sql += ` ORDER BY detected_at DESC LIMIT $${params.length + 1}`;
-  params.push(limit);
+//   let sql = `
+//     SELECT blustick_id, event_id, mac_address, signal_type, rssi,
+//            estimated_distance, latitude, longitude, detected_at
+//     FROM detections
+//   `;
+//   const params: any[] = [];
+//   if (eventId) {
+//     sql += ` WHERE event_id = $1`;
+//     params.push(eventId);
+//   }
+//   sql += ` ORDER BY detected_at DESC LIMIT $${params.length + 1}`;
+//   params.push(limit);
 
-  const { rows } = await pool.query(sql, params);
-  res.json(rows);
-});
+//   const { rows } = await pool.query(sql, params);
+//   res.json(rows);
+// });
 
 // POST /detections  -> bulk insert from app/ESP32
 const NewDetectionSchema = z.object({

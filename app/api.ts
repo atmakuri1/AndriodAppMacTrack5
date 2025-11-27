@@ -62,32 +62,38 @@ export async function createDetectionsBatch(
     return { inserted: 0 };
   }
 
+  const payload = JSON.stringify({ detections: rows });
+  const payloadSizeKB = (payload.length / 1024).toFixed(2);
+  
+  console.log("[API] ====== UPLOAD START ======");
   console.log("[API] Uploading batch of", rows.length, "detections");
+  console.log("[API] Payload size:", payloadSizeKB, "KB");
   console.log("[API] First detection:", JSON.stringify(rows[0], null, 2));
 
   try {
     const res = await authedFetch(`/detections/batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ detections: rows }),
+      body: payload,
     });
 
     console.log("[API] Response status:", res.status);
-    console.log("[API] Response headers:", JSON.stringify(res.headers, null, 2));
 
     const data = await safeJson(res);
     console.log("[API] Response body:", JSON.stringify(data, null, 2));
 
     if (!res.ok) {
       const errorMessage = data?.error || data?.details || `HTTP ${res.status}`;
-      console.error("[API] Upload failed:", errorMessage);
+      console.error("[API] ❌ Upload failed:", errorMessage);
       throw new Error(`Upload failed: ${errorMessage}`);
     }
 
-    console.log("[API] Successfully uploaded", data.inserted, "detections");
+    console.log("[API] ✅ Successfully uploaded", data.inserted, "detections");
+    console.log("[API] ====== UPLOAD END ======");
     return data as { inserted: number };
   } catch (error: any) {
-    console.error("[API] createDetectionsBatch exception:", error);
+    console.error("[API] ❌ createDetectionsBatch exception:", error);
+    console.log("[API] ====== UPLOAD FAILED ======");
     throw error;
   }
 }
@@ -220,10 +226,6 @@ export async function createQuestionnaireResponse(input: {
   if (!res.ok) throw new Error(data?.error || "Failed to submit questionnaire");
   return data as QuestionnaireResponseRow;
 }
-
-/* ============================= Utils ============================= */
-
-// ... everything you already have above (EventRow, DetectionRow, etc.) ...
 
 /* ============================= Utils ============================= */
 

@@ -1,5 +1,5 @@
-// app/(tabs)/detections.tsx - Simplified version
-import React, { useEffect, useState, useCallback } from "react";
+// app/(tabs)/detections.tsx - With live streaming and search mode control
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -16,15 +16,20 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { DetectionRow, getDetections, createDetectionsBatch } from "../../api";
 import {
   collectDetectionsFromEsp32,
+  collectDetectionsLive,
+  stopLiveStream,
+  isLiveStreamActive,
   scanForNearbyDevices,
   SimpleBleDevice,
+  LiveStreamStatus,
+  startSearchMode,
+  stopSearchMode,
 } from "../../bleClient";
 import * as SecureStore from "expo-secure-store";
 import { PermissionsAndroid } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 const DEV_FAKE_DEVICES = false;
-const TEST_LIMIT = 20;
 
 // Reusable Components
 const SignalBars = ({ rssi }: { rssi: number | null }) => {
@@ -65,6 +70,9 @@ const IconButton = ({ name, onPress, disabled, color = "#5cd6ff", bg }: any) => 
   </Pressable>
 );
 
+// Connection status type
+type ConnectionState = 'idle' | 'connecting' | 'connected' | 'collecting' | 'uploading';
+
 export default function DetectionsScreen() {
   const router = useRouter();
   const { event_id: initialEventId, mac: macFromParams } = useLocalSearchParams<{
@@ -87,6 +95,28 @@ export default function DetectionsScreen() {
   const [deviceError, setDeviceError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
+  
+  // Connection state for better status display
+  const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [connectedDeviceName, setConnectedDeviceName] = useState<string>("");
+  
+  // Search mode state
+  const [searchModeActive, setSearchModeActive] = useState(false);
+  const [searchingDevice, setSearchingDevice] = useState<SimpleBleDevice | null>(null);
+  const [searchTargetMac, setSearchTargetMac] = useState("");
+
+  // Live streaming state
+  const [liveStreamActive, setLiveStreamActive] = useState(false);
+  const [liveStreamDevice, setLiveStreamDevice] = useState<SimpleBleDevice | null>(null);
+  const [liveStatus, setLiveStatus] = useState<LiveStreamStatus>({
+    isStreaming: false,
+    detectionCount: 0,
+    uploadedCount: 0,
+    errorCount: 0,
+    pendingCount: 0,
+    lastDetection: null,
+  });
+  const liveStreamRef = useRef<boolean>(false);
 
   // Load detections
   const loadDetections = async (eventId?: string, mac?: string) => {
@@ -120,6 +150,15 @@ export default function DetectionsScreen() {
       loadDetections(activeEventId, macFromParams as string);
     }
   }, [macFromParams]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (liveStreamRef.current) {
+        stopLiveStream();
+      }
+    };
+  }, []);
 
   // Actions
   const applyFilter = () => {
@@ -177,7 +216,154 @@ export default function DetectionsScreen() {
     }
   };
 
-  const syncDevice = async (deviceId: string) => {
+  // Activate search mode on a device
+  const activateSearchMode = async (device: SimpleBleDevice) => {
+    if (!searchTargetMac.trim()) {
+      Alert.alert("Missing MAC", "Enter a target MAC address to search for");
+      return;
+    }
+
+    try {
+      setSyncing(true);
+      setConnectionState('connecting');
+      setConnectedDeviceName(device.name ?? device.id);
+
+      await startSearchMode(device.id, searchTargetMac);
+      
+      setSearchModeActive(true);
+      setSearchingDevice(device);
+      setConnectionState('idle');
+      
+      Alert.alert(
+        "Search Mode Active",
+        `${device.name ?? device.id} is now searching for:\n${searchTargetMac.toUpperCase()}`
+      );
+    } catch (e: any) {
+      Alert.alert("Failed", e?.message || "Could not activate search mode");
+      setConnectionState('idle');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // Deactivate search mode
+  const deactivateSearchMode = async () => {
+    if (!searchingDevice) return;
+
+    try {
+      setSyncing(true);
+      setConnectionState('connecting');
+
+      await stopSearchMode(searchingDevice.id);
+      
+      setSearchModeActive(false);
+      setSearchingDevice(null);
+      setConnectionState('idle');
+      
+      Alert.alert("Search Stopped", "Device returned to passive mode");
+    } catch (e: any) {
+      Alert.alert("Failed", e?.message || "Could not stop search mode");
+      setConnectionState('idle');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // Start live streaming
+  const startLiveSync = async (device: SimpleBleDevice) => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        Alert.alert("Error", "Not authenticated");
+        return;
+      }
+
+      setSyncing(true);
+      setConnectionState('connecting');
+      setConnectedDeviceName(device.name ?? device.id);
+      setLiveStreamActive(true);
+      setLiveStreamDevice(device);
+      liveStreamRef.current = true;
+
+      // Reset live status
+      setLiveStatus({
+        isStreaming: true,
+        detectionCount: 0,
+        uploadedCount: 0,
+        errorCount: 0,
+        pendingCount: 0,
+        lastDetection: null,
+      });
+
+      // Start live collection with batched real-time upload
+      const finalStatus = await collectDetectionsLive(
+        activeEventId ?? null,
+        async (detections) => {
+          // Upload batch of detections
+          await createDetectionsBatch(detections);
+        },
+        (status) => {
+          // Update UI with live status
+          setLiveStatus(status);
+          if (status.isStreaming && connectionState !== 'connected') {
+            setConnectionState('connected');
+          }
+        },
+        { deviceId: device.id, timeoutMs: 0 } // 0 = no timeout, manual stop
+      );
+
+      Alert.alert(
+        "Live Stream Ended",
+        `Detected: ${finalStatus.detectionCount}\nUploaded: ${finalStatus.uploadedCount}\nErrors: ${finalStatus.errorCount}`
+      );
+
+      await loadDetections(activeEventId, activeMac);
+      setDevices([]);
+    } catch (e: any) {
+      const msg = e?.message?.includes("401") ? "Auth error" :
+                  e?.message?.includes("Network") ? "Network error" :
+                  e?.message || "Live sync failed";
+      Alert.alert("Live Sync Failed", msg);
+      setErr(msg);
+    } finally {
+      setSyncing(false);
+      setConnectionState('idle');
+      setConnectedDeviceName("");
+      setLiveStreamActive(false);
+      setLiveStreamDevice(null);
+      liveStreamRef.current = false;
+      setLiveStatus({
+        isStreaming: false,
+        detectionCount: 0,
+        uploadedCount: 0,
+        errorCount: 0,
+        pendingCount: 0,
+        lastDetection: null,
+      });
+    }
+  };
+
+  // Stop live streaming
+  const handleStopLiveStream = () => {
+    Alert.alert(
+      "Stop Live Stream",
+      "Are you sure you want to stop the live stream?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Stop", 
+          style: "destructive",
+          onPress: () => {
+            stopLiveStream();
+            liveStreamRef.current = false;
+          }
+        }
+      ]
+    );
+  };
+
+  // Batch sync (original functionality, kept for comparison/fallback)
+  const syncDeviceBatch = async (deviceId: string, deviceName: string) => {
     try {
       if (DEV_FAKE_DEVICES) {
         Alert.alert("Success", "Dev mode sync");
@@ -185,7 +371,8 @@ export default function DetectionsScreen() {
       }
 
       setSyncing(true);
-      setSyncStatus("Connecting...");
+      setConnectionState('connecting');
+      setConnectedDeviceName(deviceName);
 
       const token = await SecureStore.getItemAsync("token");
       if (!token) {
@@ -193,25 +380,28 @@ export default function DetectionsScreen() {
         return;
       }
 
-      setSyncStatus("Collecting...");
+      // Small delay to show connecting state
+      await new Promise(r => setTimeout(r, 500));
+      setConnectionState('connected');
+      setSyncStatus("Reading data...");
+
+      // Another small delay then show collecting
+      await new Promise(r => setTimeout(r, 1000));
+      setConnectionState('collecting');
+
       const batch = await collectDetectionsFromEsp32(activeEventId ?? null, 30000, { deviceId });
 
       if (!batch.length) {
-        Alert.alert("Info", "No detections");
+        Alert.alert("Info", "No detections collected");
         setDevices([]);
         return;
       }
 
-      const limited = batch.slice(0, TEST_LIMIT);
-      setSyncStatus(`Uploading ${limited.length}...`);
-
-      await createDetectionsBatch(limited);
+      setConnectionState('uploading');
+      setSyncStatus(`Uploading ${batch.length}...`);
+      await createDetectionsBatch(batch);
       
-      const msg = batch.length > TEST_LIMIT
-        ? `TEST: Uploaded ${limited.length}/${batch.length}`
-        : `${limited.length} uploaded!`;
-      
-      Alert.alert("Success", msg);
+      Alert.alert("Success", `${batch.length} detections uploaded!`);
       await loadDetections(activeEventId, activeMac);
       setDevices([]);
     } catch (e: any) {
@@ -222,7 +412,25 @@ export default function DetectionsScreen() {
       setErr(msg);
     } finally {
       setSyncing(false);
+      setConnectionState('idle');
+      setConnectedDeviceName("");
       setSyncStatus("");
+    }
+  };
+
+  // Get status display based on connection state
+  const getConnectionStatusDisplay = () => {
+    switch (connectionState) {
+      case 'connecting':
+        return { icon: "bluetooth", text: `Connecting to ${connectedDeviceName}...`, color: "#ffa500" };
+      case 'connected':
+        return { icon: "checkmark-circle", text: `Connected to ${connectedDeviceName}`, color: "#4cd964" };
+      case 'collecting':
+        return { icon: "radio", text: `Reading data from ${connectedDeviceName}...`, color: "#5cd6ff" };
+      case 'uploading':
+        return { icon: "cloud-upload", text: `Uploading...`, color: "#5cd6ff" };
+      default:
+        return null;
     }
   };
 
@@ -277,6 +485,8 @@ export default function DetectionsScreen() {
     []
   );
 
+  const connectionStatus = getConnectionStatusDisplay();
+
   return (
     <SafeAreaView style={s.root}>
       <View style={s.divider} />
@@ -313,73 +523,185 @@ export default function DetectionsScreen() {
               <View style={s.actions}>
                 <Pressable
                   onPress={startScan}
-                  disabled={scanning || syncing}
-                  style={[s.syncBtn, (scanning || syncing) && s.disabled]}
+                  disabled={scanning || syncing || liveStreamActive}
+                  style={[s.syncBtn, (scanning || syncing || liveStreamActive) && s.disabled]}
                 >
                   <Ionicons name="bluetooth" size={16} color="#0b1420" />
-                  <Text style={s.syncText}>{scanning ? "Scanning" : "Sync"}</Text>
+                  <Text style={s.syncText}>{scanning ? "Scanning" : "Scan"}</Text>
                 </Pressable>
 
-                <IconButton name="refresh" onPress={() => { setRefreshing(true); loadDetections(activeEventId, activeMac); }} disabled={refreshing} />
+                <IconButton name="refresh" onPress={() => { setRefreshing(true); loadDetections(activeEventId, activeMac); }} disabled={refreshing || liveStreamActive} />
                 {activeMac && <IconButton name="map" onPress={viewOnMap} />}
                 {(activeEventId || activeMac) && <IconButton name="close" onPress={clearFilter} color="#ff6b6b" />}
               </View>
             </View>
 
-            {/* Sync Status */}
-            {syncStatus && (
-              <View style={s.statusBar}>
-                <ActivityIndicator size="small" color="#5cd6ff" />
-                <Text style={s.statusText}>{syncStatus}</Text>
+            {/* Connection Status Bar (for batch sync) */}
+            {connectionStatus && !liveStreamActive && (
+              <View style={[s.connectionBar, { borderColor: connectionStatus.color }]}>
+                <View style={[s.connectionDot, { backgroundColor: connectionStatus.color }]} />
+                <Ionicons name={connectionStatus.icon as any} size={18} color={connectionStatus.color} />
+                <Text style={[s.connectionText, { color: connectionStatus.color }]}>
+                  {connectionStatus.text}
+                </Text>
+                {connectionState === 'collecting' && (
+                  <ActivityIndicator size="small" color={connectionStatus.color} style={{ marginLeft: 'auto' }} />
+                )}
               </View>
             )}
 
-            {/* Devices */}
-            <View style={s.section}>
-              <View style={s.row}>
-                <Ionicons name="hardware-chip-outline" size={18} color="#5cd6ff" />
-                <Text style={s.sectionTitle}>Nearby Devices</Text>
+            {/* Live Stream Status Bar */}
+            {liveStreamActive && liveStreamDevice && (
+              <View style={s.liveStreamBar}>
+                <View style={s.liveStreamContent}>
+                  <View style={s.liveIndicator}>
+                    <View style={s.liveDot} />
+                    <Text style={s.liveText}>LIVE</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={s.liveConnectedRow}>
+                      <Ionicons name="checkmark-circle" size={14} color="#4cd964" />
+                      <Text style={s.liveDeviceName}>{liveStreamDevice.name ?? liveStreamDevice.id}</Text>
+                    </View>
+                    <View style={s.liveStats}>
+                      <Text style={s.liveStat}>
+                        <Text style={s.liveStatValue}>{liveStatus.detectionCount}</Text> detected
+                      </Text>
+                      <Text style={s.liveStat}>
+                        <Text style={s.liveStatValue}>{liveStatus.uploadedCount}</Text> uploaded
+                      </Text>
+                      {liveStatus.pendingCount > 0 && (
+                        <Text style={[s.liveStat, { color: "#ffa500" }]}>
+                          <Text style={s.liveStatValue}>{liveStatus.pendingCount}</Text> pending
+                        </Text>
+                      )}
+                      {liveStatus.errorCount > 0 && (
+                        <Text style={[s.liveStat, { color: "#ff6b6b" }]}>
+                          <Text style={s.liveStatValue}>{liveStatus.errorCount}</Text> errors
+                        </Text>
+                      )}
+                    </View>
+                    {liveStatus.lastDetection && (
+                      <Text style={s.lastDetection}>
+                        Last: {liveStatus.lastDetection.mac_address}
+                      </Text>
+                    )}
+                  </View>
+                  <Pressable
+                    onPress={handleStopLiveStream}
+                    style={s.stopLiveBtn}
+                  >
+                    <Ionicons name="stop-circle" size={24} color="#ff6b6b" />
+                    <Text style={s.stopLiveText}>Stop</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+
+            {/* Search Mode Status */}
+            {searchModeActive && searchingDevice && !liveStreamActive && (
+              <View style={s.searchModeBar}>
+                <View style={s.searchModeContent}>
+                  <View style={s.searchModeIcon}>
+                    <Ionicons name="search" size={16} color="#5cd6ff" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.searchModeTitle}>🔍 Active Search Mode</Text>
+                    <Text style={s.searchModeDevice}>{searchingDevice.name ?? searchingDevice.id}</Text>
+                    <Text style={s.searchModeTarget}>Target: {searchTargetMac.toUpperCase()}</Text>
+                  </View>
+                  <Pressable
+                    onPress={deactivateSearchMode}
+                    disabled={syncing}
+                    style={[s.stopSearchBtn, syncing && s.disabled]}
+                  >
+                    <Ionicons name="stop-circle" size={20} color="#ff6b6b" />
+                    <Text style={s.stopSearchText}>Stop</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+
+            {/* Devices - Compact version */}
+            <View style={s.devicesSection}>
+              <View style={s.deviceHeader}>
+                <Ionicons name="hardware-chip-outline" size={16} color="#5cd6ff" />
+                <Text style={s.deviceHeaderTitle}>Nearby Devices</Text>
+                {devices.length > 0 && (
+                  <View style={s.deviceCount}>
+                    <Text style={s.deviceCountText}>{devices.length}</Text>
+                  </View>
+                )}
               </View>
 
+              {/* Target MAC Input (for search mode) - inline */}
+              {devices.length > 0 && !searchModeActive && !liveStreamActive && (
+                <View style={s.targetMacRow}>
+                  <Text style={s.targetMacLabel}>Search target:</Text>
+                  <TextInput
+                    style={s.targetMacInputCompact}
+                    value={searchTargetMac}
+                    onChangeText={setSearchTargetMac}
+                    placeholder="AA:BB:CC:DD:EE:FF"
+                    placeholderTextColor="#7f8a99"
+                    autoCapitalize="characters"
+                  />
+                </View>
+              )}
+
               {scanning ? (
-                <View style={s.center}>
+                <View style={s.deviceLoading}>
                   <ActivityIndicator size="small" color="#5cd6ff" />
-                  <Text style={s.info}>Scanning...</Text>
+                  <Text style={s.deviceLoadingText}>Scanning...</Text>
                 </View>
               ) : deviceError ? (
-                <View style={s.errorBox}>
-                  <Ionicons name="alert-circle-outline" size={20} color="#ff6b6b" />
-                  <Text style={s.errorText}>{deviceError}</Text>
+                <View style={s.deviceErrorRow}>
+                  <Ionicons name="alert-circle-outline" size={16} color="#ff6b6b" />
+                  <Text style={s.deviceErrorText}>{deviceError}</Text>
                 </View>
               ) : !devices.length ? (
-                <View style={s.empty}>
-                  <Ionicons name="bluetooth-outline" size={32} color="#3a4b5c" />
-                  <Text style={s.info}>Tap "Sync" to scan</Text>
-                </View>
+                <Text style={s.noDevicesText}>Tap "Scan" to find devices</Text>
               ) : (
                 devices.map((d) => (
-                  <Pressable
-                    key={d.id}
-                    style={s.device}
-                    onPress={() => syncDevice(d.id)}
-                    disabled={syncing}
-                  >
-                    <View style={s.deviceIcon}>
-                      <Ionicons name="hardware-chip" size={24} color="#5cd6ff" />
-                    </View>
-                    <View style={{ flex: 1 }}>
+                  <View key={d.id} style={s.deviceRow}>
+                    <Ionicons name="hardware-chip" size={20} color="#5cd6ff" />
+                    <View style={s.deviceInfo}>
                       <Text style={s.deviceName}>{d.name ?? "unnamed"}</Text>
                       <Text style={s.deviceId}>{d.id}</Text>
                     </View>
-                    <Ionicons name="chevron-forward" size={20} color="#9aa4b2" />
-                  </Pressable>
+                    {!searchModeActive && !liveStreamActive && (
+                      <View style={s.deviceBtns}>
+                        <Pressable
+                          style={s.btnSearch}
+                          onPress={() => activateSearchMode(d)}
+                          disabled={syncing}
+                        >
+                          <Ionicons name="search" size={12} color="#0b1420" />
+                        </Pressable>
+                        <Pressable
+                          style={s.btnLive}
+                          onPress={() => startLiveSync(d)}
+                          disabled={syncing}
+                        >
+                          <Ionicons name="radio" size={12} color="#fff" />
+                        </Pressable>
+                        <Pressable
+                          style={s.btnBatch}
+                          onPress={() => syncDeviceBatch(d.id, d.name ?? d.id)}
+                          disabled={syncing}
+                        >
+                          <Ionicons name="cloud-upload-outline" size={12} color="#0b1420" />
+                        </Pressable>
+                      </View>
+                    )}
+                  </View>
                 ))
               )}
             </View>
 
             {/* Status */}
             <View style={s.status}>
-              <View style={s.row}>
+              <View style={s.statusRow}>
                 <Ionicons name={activeMac ? "filter" : "list"} size={14} color="#9aa4b2" />
                 <Text style={s.statusLabel}>
                   {activeMac ? (
@@ -433,35 +755,137 @@ const s = StyleSheet.create({
   divider: { height: 1, backgroundColor: "rgba(92,214,255,0.12)" },
   content: { padding: 16 },
   
-  section: { marginBottom: 12, padding: 12, borderRadius: 10, backgroundColor: "rgba(10,18,32,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.18)" },
+  section: { marginBottom: 10, padding: 12, borderRadius: 10, backgroundColor: "rgba(10,18,32,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.18)" },
   sectionLabel: { color: "#9aa4b2", fontSize: 11, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 },
-  sectionTitle: { color: "#c9d5e3", fontSize: 13, fontWeight: "600" },
   
-  inputRow: { flexDirection: "row", backgroundColor: "#0f1a2a", borderWidth: 1, borderColor: "rgba(92,214,255,0.25)", borderRadius: 10, height: 48, marginBottom: 8 },
+  inputRow: { flexDirection: "row", backgroundColor: "#0f1a2a", borderWidth: 1, borderColor: "rgba(92,214,255,0.25)", borderRadius: 10, height: 44, marginBottom: 8 },
   input: { flex: 1, color: "#e6edf5", fontSize: 14, paddingLeft: 12 },
-  applyBtn: { paddingHorizontal: 20, backgroundColor: "#23b8f0", borderTopRightRadius: 9, borderBottomRightRadius: 9, justifyContent: "center" },
-  applyText: { color: "#0b1420", fontWeight: "700", fontSize: 14 },
+  applyBtn: { paddingHorizontal: 16, backgroundColor: "#23b8f0", borderTopRightRadius: 9, borderBottomRightRadius: 9, justifyContent: "center" },
+  applyText: { color: "#0b1420", fontWeight: "700", fontSize: 13 },
   
   actions: { flexDirection: "row", gap: 8, justifyContent: "flex-end" },
-  syncBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: "#23b8f0" },
+  syncBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, backgroundColor: "#23b8f0" },
   syncText: { color: "#0b1420", fontSize: 13, fontWeight: "700" },
-  iconBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.4)", backgroundColor: "rgba(35,184,240,0.08)" },
-  disabled: { opacity: 0.6 },
+  iconBtn: { paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.4)", backgroundColor: "rgba(35,184,240,0.08)" },
+  disabled: { opacity: 0.5 },
   
-  statusBar: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "rgba(92,214,255,0.1)", paddingHorizontal: 12, paddingVertical: 10, borderRadius: 8, marginBottom: 12, borderWidth: 1, borderColor: "rgba(92,214,255,0.25)" },
-  statusText: { color: "#5cd6ff", fontSize: 13, fontWeight: "600" },
+  // Connection status bar
+  connectionBar: { 
+    flexDirection: "row", 
+    alignItems: "center", 
+    gap: 10, 
+    backgroundColor: "rgba(18,28,44,0.9)", 
+    paddingHorizontal: 12, 
+    paddingVertical: 10, 
+    borderRadius: 8, 
+    marginBottom: 10, 
+    borderWidth: 1 
+  },
+  connectionDot: { width: 8, height: 8, borderRadius: 4 },
+  connectionText: { fontSize: 13, fontWeight: "600", flex: 1 },
   
-  device: { flexDirection: "row", alignItems: "center", padding: 12, borderRadius: 8, backgroundColor: "rgba(18,28,44,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.25)", marginTop: 8, gap: 12 },
-  deviceIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(92,214,255,0.1)", alignItems: "center", justifyContent: "center" },
-  deviceName: { color: "#e6edf5", fontSize: 14, fontWeight: "600" },
-  deviceId: { color: "#7f8a99", fontSize: 11 },
+  // Live stream bar
+  liveStreamBar: { 
+    marginBottom: 10, 
+    padding: 10, 
+    borderRadius: 10, 
+    backgroundColor: "rgba(255,59,48,0.08)", 
+    borderWidth: 2, 
+    borderColor: "#ff3b30" 
+  },
+  liveStreamContent: { flexDirection: "row", alignItems: "center", gap: 10 },
+  liveIndicator: { 
+    flexDirection: "row", 
+    alignItems: "center", 
+    gap: 5, 
+    backgroundColor: "#ff3b30", 
+    paddingHorizontal: 8, 
+    paddingVertical: 5, 
+    borderRadius: 5 
+  },
+  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#fff" },
+  liveText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 1 },
+  liveConnectedRow: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 2 },
+  liveDeviceName: { color: "#e6edf5", fontSize: 13, fontWeight: "600" },
+  liveStats: { flexDirection: "row", gap: 10 },
+  liveStat: { color: "#9aa4b2", fontSize: 10 },
+  liveStatValue: { color: "#5cd6ff", fontWeight: "700" },
+  lastDetection: { color: "#7f8a99", fontSize: 9, marginTop: 2, fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) },
+  stopLiveBtn: { alignItems: "center", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: "rgba(255,107,107,0.15)", borderWidth: 1, borderColor: "#ff6b6b" },
+  stopLiveText: { color: "#ff6b6b", fontSize: 9, fontWeight: "700", marginTop: 1 },
   
-  status: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10, backgroundColor: "rgba(18,28,44,0.6)", borderRadius: 8, marginBottom: 12 },
-  statusLabel: { color: "#9aa4b2", fontSize: 12, flex: 1 },
+  // Search mode bar
+  searchModeBar: { marginBottom: 10, padding: 10, borderRadius: 10, backgroundColor: "rgba(92,214,255,0.08)", borderWidth: 1, borderColor: "#5cd6ff" },
+  searchModeContent: { flexDirection: "row", alignItems: "center", gap: 10 },
+  searchModeIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: "rgba(92,214,255,0.2)", alignItems: "center", justifyContent: "center" },
+  searchModeTitle: { color: "#5cd6ff", fontSize: 12, fontWeight: "700" },
+  searchModeDevice: { color: "#e6edf5", fontSize: 11 },
+  searchModeTarget: { color: "#9aa4b2", fontSize: 10, fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) },
+  stopSearchBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: "rgba(255,107,107,0.15)", borderWidth: 1, borderColor: "#ff6b6b" },
+  stopSearchText: { color: "#ff6b6b", fontSize: 11, fontWeight: "700" },
+  
+  // Compact devices section
+  devicesSection: { 
+    marginBottom: 10, 
+    padding: 10, 
+    borderRadius: 8, 
+    backgroundColor: "rgba(10,18,32,0.9)", 
+    borderWidth: 1, 
+    borderColor: "rgba(92,214,255,0.18)" 
+  },
+  deviceHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  deviceHeaderTitle: { color: "#c9d5e3", fontSize: 12, fontWeight: "600", flex: 1 },
+  deviceCount: { backgroundColor: "rgba(92,214,255,0.2)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10 },
+  deviceCountText: { color: "#5cd6ff", fontSize: 11, fontWeight: "700" },
+  
+  targetMacRow: { flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 },
+  targetMacLabel: { color: "#7f8a99", fontSize: 11 },
+  targetMacInputCompact: { 
+    flex: 1, 
+    backgroundColor: "#0f1a2a", 
+    borderWidth: 1, 
+    borderColor: "rgba(92,214,255,0.2)", 
+    borderRadius: 6, 
+    height: 32, 
+    paddingHorizontal: 10, 
+    color: "#e6edf5", 
+    fontSize: 12, 
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) 
+  },
+  
+  deviceLoading: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, paddingVertical: 8 },
+  deviceLoadingText: { color: "#9aa4b2", fontSize: 12 },
+  deviceErrorRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
+  deviceErrorText: { color: "#ff6b6b", fontSize: 11 },
+  noDevicesText: { color: "#7f8a99", fontSize: 11, marginTop: 6 },
+  
+  deviceRow: { 
+    flexDirection: "row", 
+    alignItems: "center", 
+    paddingVertical: 8, 
+    paddingHorizontal: 8, 
+    marginTop: 6, 
+    backgroundColor: "rgba(18,28,44,0.6)", 
+    borderRadius: 6, 
+    gap: 10 
+  },
+  deviceInfo: { flex: 1 },
+  deviceName: { color: "#e6edf5", fontSize: 13, fontWeight: "600" },
+  deviceId: { color: "#7f8a99", fontSize: 10 },
+  deviceBtns: { flexDirection: "row", gap: 4 },
+  btnSearch: { width: 28, height: 28, borderRadius: 6, backgroundColor: "#5cd6ff", alignItems: "center", justifyContent: "center" },
+  btnLive: { width: 28, height: 28, borderRadius: 6, backgroundColor: "#ff3b30", alignItems: "center", justifyContent: "center" },
+  btnBatch: { width: 28, height: 28, borderRadius: 6, backgroundColor: "#23b8f0", alignItems: "center", justifyContent: "center" },
+  
+  // Status bar
+  status: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 10, paddingVertical: 8, backgroundColor: "rgba(18,28,44,0.6)", borderRadius: 6, marginBottom: 10 },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 6, flex: 1 },
+  statusLabel: { color: "#9aa4b2", fontSize: 11 },
   highlight: { color: "#5cd6ff", fontWeight: "600" },
-  count: { backgroundColor: "rgba(92,214,255,0.15)", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)" },
-  countText: { color: "#5cd6ff", fontSize: 12, fontWeight: "700" },
+  count: { backgroundColor: "rgba(92,214,255,0.15)", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)" },
+  countText: { color: "#5cd6ff", fontSize: 11, fontWeight: "700" },
   
+  // Detection cards
   card: { backgroundColor: "rgba(18,28,44,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.18)", borderRadius: 10, padding: 12 },
   row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
   mac: { color: "#e6edf5", fontWeight: "700", fontSize: 14 },
@@ -484,10 +908,8 @@ const s = StyleSheet.create({
   skeletonLine: { height: 12, backgroundColor: "rgba(92,214,255,0.1)", borderRadius: 4, marginBottom: 8 },
   
   center: { alignItems: "center", paddingVertical: 40, gap: 12 },
-  empty: { alignItems: "center", paddingVertical: 16, gap: 8 },
   info: { color: "#9aa4b2", fontSize: 12 },
-  errorBox: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10, backgroundColor: "rgba(255,107,107,0.1)", borderRadius: 8 },
-  errorText: { color: "#ff6b6b", fontSize: 12, flex: 1 },
+  errorText: { color: "#ff6b6b", fontSize: 12 },
   retryBtn: { marginTop: 8, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: "rgba(92,214,255,0.1)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)" },
   retryText: { color: "#5cd6ff", fontWeight: "600", fontSize: 14 },
   emptyTitle: { color: "#e6edf5", fontSize: 18, fontWeight: "700", marginTop: 8 },
