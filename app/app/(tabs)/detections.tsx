@@ -1,4 +1,4 @@
-// app/(tabs)/detections.tsx - With live streaming and search mode control
+// app/(tabs)/detections.tsx - With live streaming and search mode during live
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   View,
@@ -7,9 +7,9 @@ import {
   FlatList,
   ActivityIndicator,
   Platform,
-  TextInput,
   Pressable,
   Alert,
+  ScrollView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -18,18 +18,27 @@ import {
   collectDetectionsFromEsp32,
   collectDetectionsLive,
   stopLiveStream,
-  isLiveStreamActive,
   scanForNearbyDevices,
   SimpleBleDevice,
   LiveStreamStatus,
-  startSearchMode,
-  stopSearchMode,
+  activateSearchModeLive,
+  deactivateSearchModeLive,
 } from "../../bleClient";
 import * as SecureStore from "expo-secure-store";
 import { PermissionsAndroid } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 const DEV_FAKE_DEVICES = false;
+
+// Type for tracking unique MACs during live session
+type RecentMac = {
+  mac: string;
+  count: number;
+  lastRssi: number | null;
+  lastDistance: number | null;
+  firstSeen: Date;
+  lastSeen: Date;
+};
 
 // Reusable Components
 const SignalBars = ({ rssi }: { rssi: number | null }) => {
@@ -75,8 +84,7 @@ type ConnectionState = 'idle' | 'connecting' | 'connected' | 'collecting' | 'upl
 
 export default function DetectionsScreen() {
   const router = useRouter();
-  const { event_id: initialEventId, mac: macFromParams } = useLocalSearchParams<{
-    event_id?: string;
+  const { mac: macFromParams } = useLocalSearchParams<{
     mac?: string;
   }>();
 
@@ -84,8 +92,6 @@ export default function DetectionsScreen() {
   const [rows, setRows] = useState<DetectionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  const [eventInput, setEventInput] = useState(initialEventId ?? "");
-  const [activeEventId, setActiveEventId] = useState<string | undefined>(initialEventId as string);
   const [activeMac, setActiveMac] = useState<string | undefined>(macFromParams as string);
   const [refreshing, setRefreshing] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -99,11 +105,12 @@ export default function DetectionsScreen() {
   // Connection state for better status display
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [connectedDeviceName, setConnectedDeviceName] = useState<string>("");
-  
+
   // Search mode state
   const [searchModeActive, setSearchModeActive] = useState(false);
-  const [searchingDevice, setSearchingDevice] = useState<SimpleBleDevice | null>(null);
-  const [searchTargetMac, setSearchTargetMac] = useState("");
+  const [searchTargetMac, setSearchTargetMac] = useState<string | null>(null);
+  const [recentMacs, setRecentMacs] = useState<Map<string, RecentMac>>(new Map());
+  const recentMacsRef = useRef<Map<string, RecentMac>>(new Map());
 
   // Live streaming state
   const [liveStreamActive, setLiveStreamActive] = useState(false);
@@ -119,13 +126,12 @@ export default function DetectionsScreen() {
   const liveStreamRef = useRef<boolean>(false);
 
   // Load detections
-  const loadDetections = async (eventId?: string, mac?: string) => {
+  const loadDetections = async (mac?: string) => {
     try {
       setErr("");
       if (!refreshing) setLoading(true);
 
       const data = await getDetections({
-        event_id: eventId,
         mac_address: mac,
         limit: 200,
       });
@@ -141,13 +147,13 @@ export default function DetectionsScreen() {
 
   // Effects
   useEffect(() => {
-    loadDetections(activeEventId, activeMac);
+    loadDetections(activeMac);
   }, []);
 
   useEffect(() => {
     if (macFromParams && macFromParams !== activeMac) {
       setActiveMac(macFromParams as string);
-      loadDetections(activeEventId, macFromParams as string);
+      loadDetections(macFromParams as string);
     }
   }, [macFromParams]);
 
@@ -155,22 +161,17 @@ export default function DetectionsScreen() {
   useEffect(() => {
     return () => {
       if (liveStreamRef.current) {
-        stopLiveStream();
+        try {
+          stopLiveStream();
+        } catch (e) {
+          // Ignore cleanup errors
+        }
       }
     };
   }, []);
 
   // Actions
-  const applyFilter = () => {
-    const trimmed = eventInput.trim();
-    const next = trimmed || undefined;
-    setActiveEventId(next);
-    loadDetections(next, activeMac);
-  };
-
   const clearFilter = () => {
-    setEventInput("");
-    setActiveEventId(undefined);
     setActiveMac(undefined);
     loadDetections();
   };
@@ -216,56 +217,31 @@ export default function DetectionsScreen() {
     }
   };
 
-  // Activate search mode on a device
-  const activateSearchMode = async (device: SimpleBleDevice) => {
-    if (!searchTargetMac.trim()) {
-      Alert.alert("Missing MAC", "Enter a target MAC address to search for");
-      return;
-    }
-
+  // Activate search mode during live streaming
+  const handleActivateSearchMode = async (mac: string) => {
     try {
-      setSyncing(true);
-      setConnectionState('connecting');
-      setConnectedDeviceName(device.name ?? device.id);
-
-      await startSearchMode(device.id, searchTargetMac);
-      
+      console.log('[UI] Activating search mode for:', mac);
+      await activateSearchModeLive(mac);
       setSearchModeActive(true);
-      setSearchingDevice(device);
-      setConnectionState('idle');
-      
-      Alert.alert(
-        "Search Mode Active",
-        `${device.name ?? device.id} is now searching for:\n${searchTargetMac.toUpperCase()}`
-      );
+      setSearchTargetMac(mac);
+      Alert.alert("Search Mode Active", `Now tracking only:\n${mac}`);
     } catch (e: any) {
-      Alert.alert("Failed", e?.message || "Could not activate search mode");
-      setConnectionState('idle');
-    } finally {
-      setSyncing(false);
+      console.error('[UI] Failed to activate search mode:', e);
+      Alert.alert("Error", e?.message || "Failed to activate search mode");
     }
   };
 
-  // Deactivate search mode
-  const deactivateSearchMode = async () => {
-    if (!searchingDevice) return;
-
+  // Deactivate search mode during live streaming
+  const handleDeactivateSearchMode = async () => {
     try {
-      setSyncing(true);
-      setConnectionState('connecting');
-
-      await stopSearchMode(searchingDevice.id);
-      
+      console.log('[UI] Deactivating search mode');
+      await deactivateSearchModeLive();
       setSearchModeActive(false);
-      setSearchingDevice(null);
-      setConnectionState('idle');
-      
-      Alert.alert("Search Stopped", "Device returned to passive mode");
+      setSearchTargetMac(null);
+      Alert.alert("Search Mode Disabled", "Now tracking all nearby devices");
     } catch (e: any) {
-      Alert.alert("Failed", e?.message || "Could not stop search mode");
-      setConnectionState('idle');
-    } finally {
-      setSyncing(false);
+      console.error('[UI] Failed to deactivate search mode:', e);
+      Alert.alert("Error", e?.message || "Failed to deactivate search mode");
     }
   };
 
@@ -285,6 +261,10 @@ export default function DetectionsScreen() {
       setLiveStreamDevice(device);
       liveStreamRef.current = true;
 
+      // Reset recent MACs for this session
+      recentMacsRef.current = new Map();
+      setRecentMacs(new Map());
+
       // Reset live status
       setLiveStatus({
         isStreaming: true,
@@ -295,43 +275,90 @@ export default function DetectionsScreen() {
         lastDetection: null,
       });
 
+      console.log('[UI] Starting live stream...');
+
       // Start live collection with batched real-time upload
       const finalStatus = await collectDetectionsLive(
-        activeEventId ?? null,
+        null, // No event ID
         async (detections) => {
           // Upload batch of detections
-          await createDetectionsBatch(detections);
+          console.log(`[UI] Uploading batch of ${detections.length} detections...`);
+          try {
+            await createDetectionsBatch(detections);
+            console.log(`[UI] ✅ Batch upload complete`);
+          } catch (uploadErr: any) {
+            console.error(`[UI] ❌ Batch upload failed:`, uploadErr?.message);
+            throw uploadErr;
+          }
         },
         (status) => {
           // Update UI with live status
           setLiveStatus(status);
-          if (status.isStreaming && connectionState !== 'connected') {
+          if (status.isStreaming) {
             setConnectionState('connected');
+          }
+          
+          // Track unique MACs from detections
+          if (status.lastDetection) {
+            const mac = status.lastDetection.mac_address;
+            const now = new Date();
+            
+            const existing = recentMacsRef.current.get(mac);
+            if (existing) {
+              existing.count++;
+              existing.lastRssi = status.lastDetection.rssi;
+              existing.lastDistance = status.lastDetection.estimated_distance;
+              existing.lastSeen = now;
+            } else {
+              recentMacsRef.current.set(mac, {
+                mac,
+                count: 1,
+                lastRssi: status.lastDetection.rssi,
+                lastDistance: status.lastDetection.estimated_distance,
+                firstSeen: now,
+                lastSeen: now,
+              });
+            }
+            
+            // Update state periodically (every 10 detections to avoid too many re-renders)
+            if (status.detectionCount % 10 === 0) {
+              setRecentMacs(new Map(recentMacsRef.current));
+            }
           }
         },
         { deviceId: device.id, timeoutMs: 0 } // 0 = no timeout, manual stop
       );
 
+      console.log('[UI] ====== LIVE STREAM ENDED ======');
+      console.log('[UI] Final status:', JSON.stringify(finalStatus));
+
       Alert.alert(
         "Live Stream Ended",
-        `Detected: ${finalStatus.detectionCount}\nUploaded: ${finalStatus.uploadedCount}\nErrors: ${finalStatus.errorCount}`
+        `Detected: ${finalStatus.detectionCount}\nUploaded: ${finalStatus.uploadedCount}\nErrors: ${finalStatus.errorCount}\nUnique MACs: ${recentMacsRef.current.size}`
       );
 
-      await loadDetections(activeEventId, activeMac);
+      await loadDetections(activeMac);
       setDevices([]);
     } catch (e: any) {
+      console.error('[UI] ====== LIVE SYNC ERROR ======');
+      console.error('[UI] Error:', e);
       const msg = e?.message?.includes("401") ? "Auth error" :
                   e?.message?.includes("Network") ? "Network error" :
                   e?.message || "Live sync failed";
       Alert.alert("Live Sync Failed", msg);
       setErr(msg);
     } finally {
+      console.log('[UI] Cleaning up live stream state');
       setSyncing(false);
       setConnectionState('idle');
       setConnectedDeviceName("");
       setLiveStreamActive(false);
       setLiveStreamDevice(null);
       liveStreamRef.current = false;
+      setSearchModeActive(false);
+      setSearchTargetMac(null);
+      setRecentMacs(new Map());
+      recentMacsRef.current = new Map();
       setLiveStatus({
         isStreaming: false,
         detectionCount: 0,
@@ -343,7 +370,7 @@ export default function DetectionsScreen() {
     }
   };
 
-  // Stop live streaming
+  // Stop live streaming - with crash protection
   const handleStopLiveStream = () => {
     Alert.alert(
       "Stop Live Stream",
@@ -354,15 +381,20 @@ export default function DetectionsScreen() {
           text: "Stop", 
           style: "destructive",
           onPress: () => {
-            stopLiveStream();
-            liveStreamRef.current = false;
+            try {
+              stopLiveStream();
+              liveStreamRef.current = false;
+            } catch (e) {
+              console.warn('[UI] Error stopping live stream:', e);
+              liveStreamRef.current = false;
+            }
           }
         }
       ]
     );
   };
 
-  // Batch sync (original functionality, kept for comparison/fallback)
+  // Batch sync (one-time collection)
   const syncDeviceBatch = async (deviceId: string, deviceName: string) => {
     try {
       if (DEV_FAKE_DEVICES) {
@@ -380,16 +412,14 @@ export default function DetectionsScreen() {
         return;
       }
 
-      // Small delay to show connecting state
       await new Promise(r => setTimeout(r, 500));
       setConnectionState('connected');
       setSyncStatus("Reading data...");
 
-      // Another small delay then show collecting
       await new Promise(r => setTimeout(r, 1000));
       setConnectionState('collecting');
 
-      const batch = await collectDetectionsFromEsp32(activeEventId ?? null, 30000, { deviceId });
+      const batch = await collectDetectionsFromEsp32(null, 30000, { deviceId });
 
       if (!batch.length) {
         Alert.alert("Info", "No detections collected");
@@ -402,7 +432,7 @@ export default function DetectionsScreen() {
       await createDetectionsBatch(batch);
       
       Alert.alert("Success", `${batch.length} detections uploaded!`);
-      await loadDetections(activeEventId, activeMac);
+      await loadDetections(activeMac);
       setDevices([]);
     } catch (e: any) {
       const msg = e?.message?.includes("401") ? "Auth error" :
@@ -432,6 +462,13 @@ export default function DetectionsScreen() {
       default:
         return null;
     }
+  };
+
+  // Get sorted recent MACs (by count, descending)
+  const getSortedRecentMacs = (): RecentMac[] => {
+    return Array.from(recentMacs.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20); // Show top 20
   };
 
   // Render helpers
@@ -486,6 +523,7 @@ export default function DetectionsScreen() {
   );
 
   const connectionStatus = getConnectionStatusDisplay();
+  const sortedRecentMacs = getSortedRecentMacs();
 
   return (
     <SafeAreaView style={s.root}>
@@ -503,38 +541,34 @@ export default function DetectionsScreen() {
         windowSize={10}
         ListHeaderComponent={
           <>
-            {/* Filter */}
-            <View style={s.section}>
-              <Text style={s.sectionLabel}>EVENT FILTER</Text>
-              <View style={s.inputRow}>
-                <TextInput
-                  style={s.input}
-                  value={eventInput}
-                  onChangeText={setEventInput}
-                  placeholder="Event ID (optional)"
-                  placeholderTextColor="#9aa4b2"
-                />
-                <Pressable onPress={applyFilter} style={s.applyBtn}>
-                  <Text style={s.applyText}>Apply</Text>
-                </Pressable>
-              </View>
+            {/* Scan Section - Only show when NOT live streaming */}
+            {!liveStreamActive && (
+              <View style={s.section}>
+                <View style={s.sectionHeader}>
+                  <Ionicons name="bluetooth" size={16} color="#5cd6ff" />
+                  <Text style={s.sectionLabel}>CONNECT TO BLUSTICK</Text>
+                </View>
 
-              {/* Actions */}
-              <View style={s.actions}>
-                <Pressable
-                  onPress={startScan}
-                  disabled={scanning || syncing || liveStreamActive}
-                  style={[s.syncBtn, (scanning || syncing || liveStreamActive) && s.disabled]}
-                >
-                  <Ionicons name="bluetooth" size={16} color="#0b1420" />
-                  <Text style={s.syncText}>{scanning ? "Scanning" : "Scan"}</Text>
-                </Pressable>
+                <View style={s.actions}>
+                  <Pressable
+                    onPress={startScan}
+                    disabled={scanning || syncing}
+                    style={[s.syncBtn, (scanning || syncing) && s.disabled]}
+                  >
+                    <Ionicons name="bluetooth" size={16} color="#0b1420" />
+                    <Text style={s.syncText}>{scanning ? "Scanning..." : "Scan Devices"}</Text>
+                  </Pressable>
 
-                <IconButton name="refresh" onPress={() => { setRefreshing(true); loadDetections(activeEventId, activeMac); }} disabled={refreshing || liveStreamActive} />
-                {activeMac && <IconButton name="map" onPress={viewOnMap} />}
-                {(activeEventId || activeMac) && <IconButton name="close" onPress={clearFilter} color="#ff6b6b" />}
+                  <IconButton 
+                    name="refresh" 
+                    onPress={() => { setRefreshing(true); loadDetections(activeMac); }} 
+                    disabled={refreshing} 
+                  />
+                  {activeMac && <IconButton name="map" onPress={viewOnMap} />}
+                  {activeMac && <IconButton name="close" onPress={clearFilter} color="#ff6b6b" />}
+                </View>
               </View>
-            </View>
+            )}
 
             {/* Connection Status Bar (for batch sync) */}
             {connectionStatus && !liveStreamActive && (
@@ -563,6 +597,11 @@ export default function DetectionsScreen() {
                       <Ionicons name="checkmark-circle" size={14} color="#4cd964" />
                       <Text style={s.liveDeviceName}>{liveStreamDevice.name ?? liveStreamDevice.id}</Text>
                     </View>
+                    {searchModeActive && searchTargetMac && (
+                      <Text style={s.liveSearchTarget}>
+                        🎯 Tracking: {searchTargetMac}
+                      </Text>
+                    )}
                     <View style={s.liveStats}>
                       <Text style={s.liveStat}>
                         <Text style={s.liveStatValue}>{liveStatus.detectionCount}</Text> detected
@@ -570,22 +609,15 @@ export default function DetectionsScreen() {
                       <Text style={s.liveStat}>
                         <Text style={s.liveStatValue}>{liveStatus.uploadedCount}</Text> uploaded
                       </Text>
-                      {liveStatus.pendingCount > 0 && (
-                        <Text style={[s.liveStat, { color: "#ffa500" }]}>
-                          <Text style={s.liveStatValue}>{liveStatus.pendingCount}</Text> pending
-                        </Text>
-                      )}
+                      <Text style={s.liveStat}>
+                        <Text style={s.liveStatValue}>{recentMacs.size}</Text> unique
+                      </Text>
                       {liveStatus.errorCount > 0 && (
                         <Text style={[s.liveStat, { color: "#ff6b6b" }]}>
                           <Text style={s.liveStatValue}>{liveStatus.errorCount}</Text> errors
                         </Text>
                       )}
                     </View>
-                    {liveStatus.lastDetection && (
-                      <Text style={s.lastDetection}>
-                        Last: {liveStatus.lastDetection.mac_address}
-                      </Text>
-                    )}
                   </View>
                   <Pressable
                     onPress={handleStopLiveStream}
@@ -598,106 +630,148 @@ export default function DetectionsScreen() {
               </View>
             )}
 
-            {/* Search Mode Status */}
-            {searchModeActive && searchingDevice && !liveStreamActive && (
-              <View style={s.searchModeBar}>
-                <View style={s.searchModeContent}>
-                  <View style={s.searchModeIcon}>
-                    <Ionicons name="search" size={16} color="#5cd6ff" />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.searchModeTitle}>🔍 Active Search Mode</Text>
-                    <Text style={s.searchModeDevice}>{searchingDevice.name ?? searchingDevice.id}</Text>
-                    <Text style={s.searchModeTarget}>Target: {searchTargetMac.toUpperCase()}</Text>
-                  </View>
-                  <Pressable
-                    onPress={deactivateSearchMode}
-                    disabled={syncing}
-                    style={[s.stopSearchBtn, syncing && s.disabled]}
-                  >
-                    <Ionicons name="stop-circle" size={20} color="#ff6b6b" />
-                    <Text style={s.stopSearchText}>Stop</Text>
-                  </Pressable>
+            {/* Search Mode Section - Only show DURING live streaming */}
+            {liveStreamActive && (
+              <View style={s.searchSection}>
+                <View style={s.sectionHeader}>
+                  <Ionicons name="search" size={16} color="#5cd6ff" />
+                  <Text style={s.sectionLabel}>SEARCH MODE</Text>
+                  {searchModeActive && (
+                    <View style={s.activeIndicator}>
+                      <Text style={s.activeIndicatorText}>ACTIVE</Text>
+                    </View>
+                  )}
                 </View>
+                
+                {searchModeActive && searchTargetMac ? (
+                  // Show current tracking target with stop button
+                  <View style={s.trackingActive}>
+                    <View style={s.trackingInfo}>
+                      <Ionicons name="locate" size={20} color="#5cd6ff" />
+                      <View>
+                        <Text style={s.trackingLabel}>Tracking:</Text>
+                        <Text style={s.trackingMac}>{searchTargetMac}</Text>
+                      </View>
+                    </View>
+                    <Pressable
+                      onPress={handleDeactivateSearchMode}
+                      style={s.stopTrackingBtn}
+                    >
+                      <Ionicons name="close-circle" size={18} color="#ff6b6b" />
+                      <Text style={s.stopTrackingText}>Stop Tracking</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  // Show list of recent MACs to choose from
+                  <>
+                    <Text style={s.sectionDescription}>
+                      Tap a device below to track only that MAC address:
+                    </Text>
+                    
+                    {sortedRecentMacs.length === 0 ? (
+                      <View style={s.noMacsContainer}>
+                        <Ionicons name="radio-outline" size={32} color="#3a4b5c" />
+                        <Text style={s.noMacsText}>Waiting for detections...</Text>
+                        <Text style={s.noMacsSubtext}>Devices will appear here as they're detected</Text>
+                      </View>
+                    ) : (
+                      <ScrollView 
+                        horizontal 
+                        showsHorizontalScrollIndicator={false}
+                        style={s.macList}
+                        contentContainerStyle={s.macListContent}
+                      >
+                        {sortedRecentMacs.map((item) => (
+                          <Pressable
+                            key={item.mac}
+                            style={s.macChip}
+                            onPress={() => handleActivateSearchMode(item.mac)}
+                          >
+                            <Text style={s.macChipMac}>{item.mac}</Text>
+                            <View style={s.macChipStats}>
+                              <Text style={s.macChipCount}>{item.count}x</Text>
+                              {item.lastDistance && (
+                                <Text style={s.macChipDistance}>
+                                  {item.lastDistance.toFixed(1)}m
+                                </Text>
+                              )}
+                            </View>
+                          </Pressable>
+                        ))}
+                      </ScrollView>
+                    )}
+                  </>
+                )}
               </View>
             )}
 
-            {/* Devices - Compact version */}
-            <View style={s.devicesSection}>
-              <View style={s.deviceHeader}>
-                <Ionicons name="hardware-chip-outline" size={16} color="#5cd6ff" />
-                <Text style={s.deviceHeaderTitle}>Nearby Devices</Text>
-                {devices.length > 0 && (
-                  <View style={s.deviceCount}>
-                    <Text style={s.deviceCountText}>{devices.length}</Text>
-                  </View>
-                )}
-              </View>
-
-              {/* Target MAC Input (for search mode) - inline */}
-              {devices.length > 0 && !searchModeActive && !liveStreamActive && (
-                <View style={s.targetMacRow}>
-                  <Text style={s.targetMacLabel}>Search target:</Text>
-                  <TextInput
-                    style={s.targetMacInputCompact}
-                    value={searchTargetMac}
-                    onChangeText={setSearchTargetMac}
-                    placeholder="AA:BB:CC:DD:EE:FF"
-                    placeholderTextColor="#7f8a99"
-                    autoCapitalize="characters"
-                  />
-                </View>
-              )}
-
-              {scanning ? (
-                <View style={s.deviceLoading}>
-                  <ActivityIndicator size="small" color="#5cd6ff" />
-                  <Text style={s.deviceLoadingText}>Scanning...</Text>
-                </View>
-              ) : deviceError ? (
-                <View style={s.deviceErrorRow}>
-                  <Ionicons name="alert-circle-outline" size={16} color="#ff6b6b" />
-                  <Text style={s.deviceErrorText}>{deviceError}</Text>
-                </View>
-              ) : !devices.length ? (
-                <Text style={s.noDevicesText}>Tap "Scan" to find devices</Text>
-              ) : (
-                devices.map((d) => (
-                  <View key={d.id} style={s.deviceRow}>
-                    <Ionicons name="hardware-chip" size={20} color="#5cd6ff" />
-                    <View style={s.deviceInfo}>
-                      <Text style={s.deviceName}>{d.name ?? "unnamed"}</Text>
-                      <Text style={s.deviceId}>{d.id}</Text>
+            {/* Devices Section - Only show when NOT live streaming */}
+            {!liveStreamActive && (
+              <View style={s.devicesSection}>
+                <View style={s.deviceHeader}>
+                  <Ionicons name="hardware-chip-outline" size={16} color="#5cd6ff" />
+                  <Text style={s.deviceHeaderTitle}>Nearby Devices</Text>
+                  {devices.length > 0 && (
+                    <View style={s.deviceCount}>
+                      <Text style={s.deviceCountText}>{devices.length}</Text>
                     </View>
-                    {!searchModeActive && !liveStreamActive && (
+                  )}
+                </View>
+
+                {scanning ? (
+                  <View style={s.deviceLoading}>
+                    <ActivityIndicator size="small" color="#5cd6ff" />
+                    <Text style={s.deviceLoadingText}>Scanning for BluStick devices...</Text>
+                  </View>
+                ) : deviceError ? (
+                  <View style={s.deviceErrorRow}>
+                    <Ionicons name="alert-circle-outline" size={16} color="#ff6b6b" />
+                    <Text style={s.deviceErrorText}>{deviceError}</Text>
+                  </View>
+                ) : !devices.length ? (
+                  <Text style={s.noDevicesText}>Tap "Scan Devices" to find nearby BluStick devices</Text>
+                ) : (
+                  devices.map((d) => (
+                    <View key={d.id} style={s.deviceRow}>
+                      <Ionicons name="hardware-chip" size={20} color="#5cd6ff" />
+                      <View style={s.deviceInfo}>
+                        <Text style={s.deviceName}>{d.name ?? "unnamed"}</Text>
+                        <Text style={s.deviceId}>{d.id}</Text>
+                      </View>
                       <View style={s.deviceBtns}>
                         <Pressable
-                          style={s.btnSearch}
-                          onPress={() => activateSearchMode(d)}
-                          disabled={syncing}
-                        >
-                          <Ionicons name="search" size={12} color="#0b1420" />
-                        </Pressable>
-                        <Pressable
-                          style={s.btnLive}
+                          style={[s.deviceActionBtn, s.btnLive]}
                           onPress={() => startLiveSync(d)}
                           disabled={syncing}
                         >
-                          <Ionicons name="radio" size={12} color="#fff" />
+                          <Ionicons name="radio" size={14} color="#fff" />
+                          <Text style={s.deviceActionText}>Live</Text>
                         </Pressable>
                         <Pressable
-                          style={s.btnBatch}
+                          style={[s.deviceActionBtn, s.btnBatch]}
                           onPress={() => syncDeviceBatch(d.id, d.name ?? d.id)}
                           disabled={syncing}
                         >
-                          <Ionicons name="cloud-upload-outline" size={12} color="#0b1420" />
+                          <Ionicons name="cloud-upload-outline" size={14} color="#0b1420" />
+                          <Text style={[s.deviceActionText, { color: "#0b1420" }]}>Sync</Text>
                         </Pressable>
                       </View>
-                    )}
+                    </View>
+                  ))
+                )}
+                
+                {devices.length > 0 && (
+                  <View style={s.helpTextContainer}>
+                    <Text style={s.helpText}>
+                      <Text style={s.helpBold}>Live:</Text> Stream detections in real-time
+                    </Text>
+                    <Text style={s.helpText}>
+                      <Text style={s.helpBold}>Sync:</Text> One-time batch collection (30s)
+                    </Text>
                   </View>
-                ))
-              )}
-            </View>
+                )}
+              </View>
+            )}
 
             {/* Status */}
             <View style={s.status}>
@@ -705,9 +779,7 @@ export default function DetectionsScreen() {
                 <Ionicons name={activeMac ? "filter" : "list"} size={14} color="#9aa4b2" />
                 <Text style={s.statusLabel}>
                   {activeMac ? (
-                    <Text style={s.highlight}>{activeMac}</Text>
-                  ) : activeEventId ? (
-                    <Text style={s.highlight}>{activeEventId}</Text>
+                    <>Filtered: <Text style={s.highlight}>{activeMac}</Text></>
                   ) : (
                     "All detections"
                   )}
@@ -730,7 +802,7 @@ export default function DetectionsScreen() {
             <View style={s.center}>
               <Ionicons name="alert-circle-outline" size={48} color="#ff6b6b" />
               <Text style={s.errorText}>{err}</Text>
-              <Pressable onPress={() => loadDetections(activeEventId, activeMac)} style={s.retryBtn}>
+              <Pressable onPress={() => loadDetections(activeMac)} style={s.retryBtn}>
                 <Text style={s.retryText}>Try Again</Text>
               </Pressable>
             </View>
@@ -755,13 +827,149 @@ const s = StyleSheet.create({
   divider: { height: 1, backgroundColor: "rgba(92,214,255,0.12)" },
   content: { padding: 16 },
   
-  section: { marginBottom: 10, padding: 12, borderRadius: 10, backgroundColor: "rgba(10,18,32,0.9)", borderWidth: 1, borderColor: "rgba(92,214,255,0.18)" },
-  sectionLabel: { color: "#9aa4b2", fontSize: 11, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 },
+  section: { 
+    marginBottom: 10, 
+    padding: 12, 
+    borderRadius: 10, 
+    backgroundColor: "rgba(10,18,32,0.9)", 
+    borderWidth: 1, 
+    borderColor: "rgba(92,214,255,0.18)" 
+  },
+  sectionHeader: { 
+    flexDirection: "row", 
+    alignItems: "center", 
+    gap: 6, 
+    marginBottom: 8 
+  },
+  sectionLabel: { 
+    color: "#9aa4b2", 
+    fontSize: 11, 
+    textTransform: "uppercase", 
+    letterSpacing: 0.5,
+    flex: 1,
+  },
+  sectionDescription: {
+    color: "#7f8a99",
+    fontSize: 11,
+    marginBottom: 10,
+    lineHeight: 16,
+  },
+  activeIndicator: {
+    backgroundColor: "#4cd964",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  activeIndicatorText: {
+    color: "#0b1420",
+    fontSize: 9,
+    fontWeight: "800",
+  },
   
-  inputRow: { flexDirection: "row", backgroundColor: "#0f1a2a", borderWidth: 1, borderColor: "rgba(92,214,255,0.25)", borderRadius: 10, height: 44, marginBottom: 8 },
-  input: { flex: 1, color: "#e6edf5", fontSize: 14, paddingLeft: 12 },
-  applyBtn: { paddingHorizontal: 16, backgroundColor: "#23b8f0", borderTopRightRadius: 9, borderBottomRightRadius: 9, justifyContent: "center" },
-  applyText: { color: "#0b1420", fontWeight: "700", fontSize: 13 },
+  // Search section (during live)
+  searchSection: {
+    marginBottom: 10,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: "rgba(92,214,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.25)",
+  },
+  
+  // Tracking active state
+  trackingActive: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(92,214,255,0.1)",
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  trackingInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  trackingLabel: {
+    color: "#9aa4b2",
+    fontSize: 10,
+  },
+  trackingMac: {
+    color: "#5cd6ff",
+    fontSize: 14,
+    fontWeight: "700",
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
+  stopTrackingBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: "rgba(255,107,107,0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(255,107,107,0.3)",
+  },
+  stopTrackingText: {
+    color: "#ff6b6b",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  
+  // No MACs state
+  noMacsContainer: {
+    alignItems: "center",
+    paddingVertical: 20,
+    gap: 6,
+  },
+  noMacsText: {
+    color: "#9aa4b2",
+    fontSize: 13,
+  },
+  noMacsSubtext: {
+    color: "#7f8a99",
+    fontSize: 11,
+  },
+  
+  // MAC list (horizontal scroll)
+  macList: {
+    marginTop: 8,
+    marginHorizontal: -12,
+  },
+  macListContent: {
+    paddingHorizontal: 12,
+    gap: 8,
+  },
+  macChip: {
+    backgroundColor: "rgba(18,28,44,0.9)",
+    borderWidth: 1,
+    borderColor: "rgba(92,214,255,0.3)",
+    borderRadius: 8,
+    padding: 10,
+    minWidth: 140,
+  },
+  macChipMac: {
+    color: "#e6edf5",
+    fontSize: 11,
+    fontWeight: "600",
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+    marginBottom: 4,
+  },
+  macChipStats: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  macChipCount: {
+    color: "#5cd6ff",
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  macChipDistance: {
+    color: "#9aa4b2",
+    fontSize: 10,
+  },
   
   actions: { flexDirection: "row", gap: 8, justifyContent: "flex-end" },
   syncBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, backgroundColor: "#23b8f0" },
@@ -807,24 +1015,14 @@ const s = StyleSheet.create({
   liveText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 1 },
   liveConnectedRow: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 2 },
   liveDeviceName: { color: "#e6edf5", fontSize: 13, fontWeight: "600" },
+  liveSearchTarget: { color: "#5cd6ff", fontSize: 10, marginBottom: 2 },
   liveStats: { flexDirection: "row", gap: 10 },
   liveStat: { color: "#9aa4b2", fontSize: 10 },
   liveStatValue: { color: "#5cd6ff", fontWeight: "700" },
-  lastDetection: { color: "#7f8a99", fontSize: 9, marginTop: 2, fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) },
   stopLiveBtn: { alignItems: "center", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: "rgba(255,107,107,0.15)", borderWidth: 1, borderColor: "#ff6b6b" },
   stopLiveText: { color: "#ff6b6b", fontSize: 9, fontWeight: "700", marginTop: 1 },
   
-  // Search mode bar
-  searchModeBar: { marginBottom: 10, padding: 10, borderRadius: 10, backgroundColor: "rgba(92,214,255,0.08)", borderWidth: 1, borderColor: "#5cd6ff" },
-  searchModeContent: { flexDirection: "row", alignItems: "center", gap: 10 },
-  searchModeIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: "rgba(92,214,255,0.2)", alignItems: "center", justifyContent: "center" },
-  searchModeTitle: { color: "#5cd6ff", fontSize: 12, fontWeight: "700" },
-  searchModeDevice: { color: "#e6edf5", fontSize: 11 },
-  searchModeTarget: { color: "#9aa4b2", fontSize: 10, fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) },
-  stopSearchBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: "rgba(255,107,107,0.15)", borderWidth: 1, borderColor: "#ff6b6b" },
-  stopSearchText: { color: "#ff6b6b", fontSize: 11, fontWeight: "700" },
-  
-  // Compact devices section
+  // Devices section
   devicesSection: { 
     marginBottom: 10, 
     padding: 10, 
@@ -838,21 +1036,6 @@ const s = StyleSheet.create({
   deviceCount: { backgroundColor: "rgba(92,214,255,0.2)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10 },
   deviceCountText: { color: "#5cd6ff", fontSize: 11, fontWeight: "700" },
   
-  targetMacRow: { flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 },
-  targetMacLabel: { color: "#7f8a99", fontSize: 11 },
-  targetMacInputCompact: { 
-    flex: 1, 
-    backgroundColor: "#0f1a2a", 
-    borderWidth: 1, 
-    borderColor: "rgba(92,214,255,0.2)", 
-    borderRadius: 6, 
-    height: 32, 
-    paddingHorizontal: 10, 
-    color: "#e6edf5", 
-    fontSize: 12, 
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) 
-  },
-  
   deviceLoading: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8, paddingVertical: 8 },
   deviceLoadingText: { color: "#9aa4b2", fontSize: 12 },
   deviceErrorRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
@@ -862,20 +1045,53 @@ const s = StyleSheet.create({
   deviceRow: { 
     flexDirection: "row", 
     alignItems: "center", 
-    paddingVertical: 8, 
-    paddingHorizontal: 8, 
-    marginTop: 6, 
+    paddingVertical: 10, 
+    paddingHorizontal: 10, 
+    marginTop: 8, 
     backgroundColor: "rgba(18,28,44,0.6)", 
-    borderRadius: 6, 
+    borderRadius: 8, 
     gap: 10 
   },
   deviceInfo: { flex: 1 },
-  deviceName: { color: "#e6edf5", fontSize: 13, fontWeight: "600" },
-  deviceId: { color: "#7f8a99", fontSize: 10 },
-  deviceBtns: { flexDirection: "row", gap: 4 },
-  btnSearch: { width: 28, height: 28, borderRadius: 6, backgroundColor: "#5cd6ff", alignItems: "center", justifyContent: "center" },
-  btnLive: { width: 28, height: 28, borderRadius: 6, backgroundColor: "#ff3b30", alignItems: "center", justifyContent: "center" },
-  btnBatch: { width: 28, height: 28, borderRadius: 6, backgroundColor: "#23b8f0", alignItems: "center", justifyContent: "center" },
+  deviceName: { color: "#e6edf5", fontSize: 14, fontWeight: "600" },
+  deviceId: { color: "#7f8a99", fontSize: 10, marginTop: 2 },
+  deviceBtns: { flexDirection: "row", gap: 8 },
+  
+  deviceActionBtn: { 
+    flexDirection: "row", 
+    alignItems: "center", 
+    gap: 4, 
+    paddingHorizontal: 12, 
+    paddingVertical: 8, 
+    borderRadius: 6 
+  },
+  deviceActionText: { 
+    fontSize: 12, 
+    fontWeight: "700", 
+    color: "#fff" 
+  },
+  btnLive: { 
+    backgroundColor: "#ff3b30" 
+  },
+  btnBatch: { 
+    backgroundColor: "#23b8f0" 
+  },
+  
+  helpTextContainer: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(92,214,255,0.1)",
+  },
+  helpText: {
+    color: "#7f8a99",
+    fontSize: 10,
+    marginBottom: 2,
+  },
+  helpBold: {
+    color: "#9aa4b2",
+    fontWeight: "600",
+  },
   
   // Status bar
   status: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 10, paddingVertical: 8, backgroundColor: "rgba(18,28,44,0.6)", borderRadius: 6, marginBottom: 10 },

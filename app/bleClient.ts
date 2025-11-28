@@ -88,6 +88,7 @@ async function getUserLocation(): Promise<{ latitude: number; longitude: number 
 
 /**
  * Send a MAC address to the ESP32 to start searching for that device
+ * This version connects, writes, and disconnects (for use when NOT live streaming)
  */
 export async function startSearchMode(
   deviceId: string,
@@ -132,6 +133,7 @@ export async function startSearchMode(
 
 /**
  * Send null/empty MAC to deactivate search mode
+ * This version connects, writes, and disconnects (for use when NOT live streaming)
  */
 export async function stopSearchMode(deviceId: string): Promise<void> {
   let device: Device | null = null;
@@ -166,6 +168,73 @@ export async function stopSearchMode(deviceId: string): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * Activate search mode on an ALREADY CONNECTED device (during live streaming)
+ * Does NOT disconnect - keeps the connection alive
+ */
+export async function activateSearchModeLive(targetMac: string): Promise<void> {
+  if (!activeLiveStream?.device) {
+    throw new Error("No active live stream - cannot activate search mode");
+  }
+
+  const device = activeLiveStream.device;
+  
+  try {
+    console.log("[BLE] 🎯 Activating search mode (live) for:", targetMac);
+    
+    // Format MAC address (ensure uppercase, colon-separated)
+    const formattedMac = targetMac.toUpperCase().replace(/[^0-9A-F:]/g, '');
+    
+    // Convert MAC string to bytes for writing
+    const macBuffer = Buffer.from(formattedMac, 'ascii');
+    const base64Mac = macBuffer.toString('base64');
+
+    await device.writeCharacteristicWithResponseForService(
+      WRITE_SERVICE_UUID,
+      WRITE_CHAR_UUID,
+      base64Mac
+    );
+
+    console.log("[BLE] ✅ Search mode activated (live) for:", formattedMac);
+  } catch (e) {
+    console.error("[BLE] Failed to activate search mode (live):", e);
+    throw e;
+  }
+  // NOTE: Do NOT disconnect - keep streaming
+}
+
+/**
+ * Deactivate search mode on an ALREADY CONNECTED device (during live streaming)
+ * Does NOT disconnect - keeps the connection alive
+ */
+export async function deactivateSearchModeLive(): Promise<void> {
+  if (!activeLiveStream?.device) {
+    throw new Error("No active live stream - cannot deactivate search mode");
+  }
+
+  const device = activeLiveStream.device;
+  
+  try {
+    console.log("[BLE] 🔄 Deactivating search mode (live)...");
+    
+    // Send empty/null MAC address (6 zero bytes)
+    const nullMac = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    const base64NullMac = nullMac.toString('base64');
+
+    await device.writeCharacteristicWithResponseForService(
+      WRITE_SERVICE_UUID,
+      WRITE_CHAR_UUID,
+      base64NullMac
+    );
+
+    console.log("[BLE] ✅ Search mode deactivated (live) - tracking all devices");
+  } catch (e) {
+    console.error("[BLE] Failed to deactivate search mode (live):", e);
+    throw e;
+  }
+  // NOTE: Do NOT disconnect - keep streaming
 }
 
 export async function scanForNearbyDevices(
@@ -232,7 +301,73 @@ async function logServicesAndCharacteristics(device: Device) {
 }
 
 /**
- * NEW: Live streaming detection collection with batched real-time upload
+ * Helper function to safely connect to a BLE device with proper state checking
+ */
+async function safeConnectToDevice(deviceId: string, timeoutMs: number = 15000): Promise<Device> {
+  console.log("[BLE] === Safe Connect Starting ===");
+  console.log("[BLE] Target device:", deviceId);
+  
+  // 1. Check BLE state first
+  const bleState = await ble.state();
+  console.log("[BLE] BLE Manager state:", bleState);
+  
+  if (bleState !== 'PoweredOn') {
+    throw new Error(`Bluetooth is not ready. State: ${bleState}`);
+  }
+  
+  // 2. Cancel any existing connection to this device
+  try {
+    const isConnected = await ble.isDeviceConnected(deviceId);
+    console.log("[BLE] Device already connected?", isConnected);
+    
+    if (isConnected) {
+      console.log("[BLE] Disconnecting existing connection...");
+      await ble.cancelDeviceConnection(deviceId);
+      await new Promise(r => setTimeout(r, 1000));
+      console.log("[BLE] Existing connection cancelled");
+    }
+  } catch (e: any) {
+    // Also try to cancel even if isDeviceConnected fails
+    try {
+      await ble.cancelDeviceConnection(deviceId);
+    } catch {}
+    console.log("[BLE] Cleanup attempt complete");
+  }
+  
+  // 3. Connect with explicit timeout handling
+  console.log("[BLE] >>> Attempting connectToDevice with timeout:", timeoutMs);
+  
+  const connectionPromise = ble.connectToDevice(deviceId, { 
+    timeout: timeoutMs,
+    requestMTU: 512 
+  });
+  
+  // Add our own timeout wrapper since BLE library timeout sometimes doesn't fire
+  const manualTimeoutMs = timeoutMs + 5000; // Extra 5s buffer
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Connection timeout (manual ${manualTimeoutMs}ms)`));
+    }, manualTimeoutMs);
+  });
+  
+  console.log("[BLE] >>> Waiting for connection...");
+  let dev: Device;
+  try {
+    dev = await Promise.race([connectionPromise, timeoutPromise]);
+  } catch (connectError: any) {
+    console.error("[BLE] Connection failed:", connectError?.message || connectError);
+    throw new Error(connectError?.message || "Failed to connect to device. Make sure it's nearby and not connected to another phone.");
+  }
+  
+  console.log("[BLE] >>> connectToDevice returned successfully!");
+  console.log("[BLE] >>> Device ID:", dev.id);
+  console.log("[BLE] >>> Device Name:", dev.name);
+  
+  return dev;
+}
+
+/**
+ * Live streaming detection collection with batched real-time upload
  * Uses a separate upload queue to keep BLE connection stable
  */
 export async function collectDetectionsLive(
@@ -242,6 +377,11 @@ export async function collectDetectionsLive(
   opts?: { deviceId?: string; timeoutMs?: number }
 ): Promise<LiveStreamStatus> {
   resetBleParser();
+
+  console.log('[BLE] ====== LIVE STREAM START ======');
+  console.log('[BLE] eventId:', eventId);
+  console.log('[BLE] deviceId:', opts?.deviceId);
+  console.log('[BLE] timeoutMs:', opts?.timeoutMs);
 
   const status: LiveStreamStatus = {
     isStreaming: true,
@@ -284,16 +424,12 @@ export async function collectDetectionsLive(
       const batch = uploadQueue.shift()!;
       
       try {
-        console.log(`[BLE] 🔴 LIVE: Uploading batch of ${batch.length} detections...`);
-        const batchSizeBytes = JSON.stringify(batch).length;
-        console.log(`[BLE] 📦 Batch payload size: ${(batchSizeBytes / 1024).toFixed(2)} KB`);
         await onDetectionBatch(batch);
         status.uploadedCount += batch.length;
-        console.log(`[BLE] ✅ LIVE: Batch uploaded. Total: ${status.uploadedCount}`);
+        console.log(`[BLE] ✅ Batch uploaded. Total uploaded: ${status.uploadedCount}`);
       } catch (uploadError: any) {
         status.errorCount += batch.length;
-        console.error(`[BLE] ❌ LIVE: Batch upload failed:`, uploadError);
-        console.error(`[BLE] ❌ Error details:`, uploadError?.message, uploadError?.response?.status);
+        console.error(`[BLE] ❌ Batch upload failed:`, uploadError?.message);
       }
 
       // Update status after each batch
@@ -318,11 +454,11 @@ export async function collectDetectionsLive(
     
     // Add to upload queue (don't await - let it process in background)
     uploadQueue.push(batch);
-    console.log(`[BLE] 📤 Queued batch of ${batch.length} for upload (queue size: ${uploadQueue.length})`);
+    console.log(`[BLE] 📤 Queued ${batch.length} detections (queue: ${uploadQueue.length})`);
     
     // Trigger upload processor (non-blocking)
     processUploadQueue().catch(err => {
-      console.error('[BLE] Upload processor error:', err);
+      console.error('[BLE] ❌ Upload processor error:', err);
     });
 
     if (onStatusUpdate) {
@@ -349,8 +485,14 @@ export async function collectDetectionsLive(
   try {
     if (opts?.deviceId) {
       console.log("[BLE] connecting to selected device:", opts.deviceId);
-      const dev = await ble.connectToDevice(opts.deviceId, { timeout: 15000 });
+      
+      // Use safe connection helper
+      const dev = await safeConnectToDevice(opts.deviceId, 15000);
+      
+      console.log("[BLE] >>> Discovering services and characteristics...");
       connected = await dev.discoverAllServicesAndCharacteristics();
+      console.log("[BLE] >>> Services discovered successfully!");
+      
     } else {
       console.log("[BLE] starting scan for default ESP32…");
       const device = await scanForDevice(TARGET_DEVICE_NAME, TARGET_DEVICE_MAC);
@@ -360,13 +502,15 @@ export async function collectDetectionsLive(
         );
       }
       console.log("[BLE] found default device:", device.id, device.name);
-      const dev = await device.connect();
+      
+      // Use safe connection for default device too
+      const dev = await safeConnectToDevice(device.id, 15000);
       connected = await dev.discoverAllServicesAndCharacteristics();
     }
 
     console.log("[BLE] connected to device:", connected.id, connected.name);
 
-    // MTU negotiation
+    // MTU negotiation (may already be done in safeConnectToDevice, but check again)
     try {
       const currentMtu = connected.mtu;
       console.log("[BLE] current MTU:", currentMtu);
@@ -396,7 +540,7 @@ export async function collectDetectionsLive(
       NOTIFY_CHAR_UUID
     );
 
-    // Store for cleanup
+    // Store for cleanup AND for search mode access
     activeLiveStream = {
       device: connected,
       subscription: null,
@@ -406,14 +550,20 @@ export async function collectDetectionsLive(
     // Start batch timer
     resetBatchTimer();
 
-    // Monitor for disconnection
-    connected.onDisconnected((error, device) => {
-      console.log('[BLE] ⚠️ Device disconnected!', error?.message || 'No error');
+    // Monitor for disconnection - but don't auto-stop on expected disconnections
+    const disconnectSubscription = connected.onDisconnected((error, device) => {
+      console.log('[BLE] ⚠️ Device disconnected event received');
+      console.log('[BLE] Error:', error?.message || 'No error');
+      console.log('[BLE] Stop requested:', activeLiveStream?.stopRequested);
+      
+      // Only mark as stopped if we didn't request the stop
       if (activeLiveStream && !activeLiveStream.stopRequested) {
-        console.log('[BLE] Unexpected disconnection - marking stream as stopped');
+        console.log('[BLE] ❌ Unexpected disconnection - will end stream');
         activeLiveStream.stopRequested = true;
       }
     });
+
+    console.log('[BLE] 🔴 Starting characteristic monitoring...');
 
     subscription = connected.monitorCharacteristicForService(
       NOTIFY_SERVICE_UUID,
@@ -421,7 +571,7 @@ export async function collectDetectionsLive(
       (error, characteristic) => {
         // IMPORTANT: Keep this callback synchronous and fast!
         if (error) {
-          console.error("[BLE] monitor error:", error);
+          console.error("[BLE] ❌ MONITOR ERROR:", error);
           return;
         }
         if (!characteristic?.value) return;
@@ -452,7 +602,10 @@ export async function collectDetectionsLive(
             pendingDetections.push(detection);
             status.pendingCount = pendingDetections.length;
 
-            console.log(`[BLE] 🔴 Detection #${status.detectionCount} - ${detection.mac_address} (pending: ${status.pendingCount})`);
+            // Only log every 50 detections to reduce noise
+            if (status.detectionCount % 50 === 0) {
+              console.log(`[BLE] 📊 Progress: ${status.detectionCount} detected, ${status.uploadedCount} uploaded, ${status.pendingCount} pending`);
+            }
 
             // Check if we should queue for upload
             if (pendingDetections.length >= LIVE_BATCH_SIZE) {
@@ -472,6 +625,8 @@ export async function collectDetectionsLive(
 
     activeLiveStream.subscription = subscription;
 
+    console.log('[BLE] 🔴 Monitoring started successfully');
+
     // If timeout specified, wait for it
     if (timeoutMs > 0) {
       console.log("[BLE] 🔴 LIVE: streaming for", timeoutMs, "ms…");
@@ -480,11 +635,20 @@ export async function collectDetectionsLive(
     } else {
       // No timeout - stream continues until stopLiveStream() called
       console.log("[BLE] 🔴 LIVE: streaming indefinitely until manually stopped...");
+      console.log("[BLE] 🔴 LIVE: stopRequested =", activeLiveStream?.stopRequested);
       
       // Return a promise that resolves when stop is requested
       await new Promise<void>((resolve) => {
         const checkStop = setInterval(() => {
-          if (activeLiveStream?.stopRequested) {
+          // Log every 10 seconds to show we're still running
+          if (status.detectionCount % 100 === 0 && status.detectionCount > 0) {
+            console.log(`[BLE] 🔴 Still streaming... detections: ${status.detectionCount}, stopRequested: ${activeLiveStream?.stopRequested}`);
+          }
+          
+          if (!activeLiveStream || activeLiveStream.stopRequested) {
+            console.log('[BLE] 🔴 Stop condition met, ending stream loop');
+            console.log('[BLE] activeLiveStream exists:', !!activeLiveStream);
+            console.log('[BLE] stopRequested:', activeLiveStream?.stopRequested);
             clearInterval(checkStop);
             resolve();
           }
@@ -492,16 +656,25 @@ export async function collectDetectionsLive(
       });
     }
 
+    console.log('[BLE] 🔴 Main loop ended, processing remaining queue...');
+
     // Queue any remaining detections
     queuePendingDetections();
     
     // Wait for upload queue to finish
-    console.log('[BLE] Waiting for upload queue to finish...');
+    console.log('[BLE] Waiting for upload queue to finish... queue size:', uploadQueue.length, 'isUploading:', isUploading);
+    let waitCount = 0;
     while (uploadQueue.length > 0 || isUploading) {
       await new Promise(r => setTimeout(r, 200));
+      waitCount++;
+      if (waitCount % 25 === 0) { // Log every 5 seconds
+        console.log('[BLE] Still waiting for uploads... queue:', uploadQueue.length, 'uploading:', isUploading);
+      }
     }
+    console.log('[BLE] Upload queue finished');
 
   } catch (e) {
+    console.error("[BLE] ====== LIVE STREAM ERROR ======");
     console.error("[BLE] collectDetectionsLive FAILED:", e);
     status.isStreaming = false;
     throw e;
@@ -513,7 +686,11 @@ export async function collectDetectionsLive(
     
     // Cleanup
     if (subscription) {
-      subscription.remove();
+      try {
+        subscription.remove();
+      } catch (e) {
+        console.warn("[BLE] Error removing subscription:", e);
+      }
     }
     if (connected) {
       try {
@@ -577,8 +754,11 @@ export async function collectDetectionsFromEsp32(
   try {
     if (opts?.deviceId) {
       console.log("[BLE] connecting to selected device:", opts.deviceId);
-      const dev = await ble.connectToDevice(opts.deviceId, { timeout: 10000 });
+      
+      // Use safe connection helper for batch sync too
+      const dev = await safeConnectToDevice(opts.deviceId, 10000);
       connected = await dev.discoverAllServicesAndCharacteristics();
+      
     } else {
       console.log("[BLE] starting scan for default ESP32…");
       const device = await scanForDevice(TARGET_DEVICE_NAME, TARGET_DEVICE_MAC);
@@ -588,7 +768,7 @@ export async function collectDetectionsFromEsp32(
         );
       }
       console.log("[BLE] found default device:", device.id, device.name);
-      const dev = await device.connect();
+      const dev = await safeConnectToDevice(device.id, 10000);
       connected = await dev.discoverAllServicesAndCharacteristics();
     }
 
@@ -678,6 +858,16 @@ export async function collectDetectionsFromEsp32(
   } catch (e) {
     console.error("[BLE] collectDetectionsFromEsp32 FAILED:", e);
     throw e;
+  } finally {
+    // Clean up connection
+    if (connected) {
+      try {
+        await connected.cancelConnection();
+        console.log('[BLE] Batch sync: Disconnected from device');
+      } catch (e) {
+        console.warn("[BLE] Error disconnecting:", e);
+      }
+    }
   }
 
   return detections;

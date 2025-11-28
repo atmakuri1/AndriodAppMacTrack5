@@ -58,17 +58,13 @@ export async function createDetectionsBatch(
   rows: NewDetectionInput[]
 ): Promise<{ inserted: number }> {
   if (!rows.length) {
-    console.log("[API] createDetectionsBatch called with 0 rows, skipping");
     return { inserted: 0 };
   }
 
   const payload = JSON.stringify({ detections: rows });
   const payloadSizeKB = (payload.length / 1024).toFixed(2);
   
-  console.log("[API] ====== UPLOAD START ======");
-  console.log("[API] Uploading batch of", rows.length, "detections");
-  console.log("[API] Payload size:", payloadSizeKB, "KB");
-  console.log("[API] First detection:", JSON.stringify(rows[0], null, 2));
+  console.log(`[API] 📤 Uploading ${rows.length} detections (${payloadSizeKB} KB)...`);
 
   try {
     const res = await authedFetch(`/detections/batch`, {
@@ -77,10 +73,7 @@ export async function createDetectionsBatch(
       body: payload,
     });
 
-    console.log("[API] Response status:", res.status);
-
     const data = await safeJson(res);
-    console.log("[API] Response body:", JSON.stringify(data, null, 2));
 
     if (!res.ok) {
       const errorMessage = data?.error || data?.details || `HTTP ${res.status}`;
@@ -88,12 +81,10 @@ export async function createDetectionsBatch(
       throw new Error(`Upload failed: ${errorMessage}`);
     }
 
-    console.log("[API] ✅ Successfully uploaded", data.inserted, "detections");
-    console.log("[API] ====== UPLOAD END ======");
+    console.log(`[API] ✅ Uploaded ${data.inserted} detections`);
     return data as { inserted: number };
   } catch (error: any) {
-    console.error("[API] ❌ createDetectionsBatch exception:", error);
-    console.log("[API] ====== UPLOAD FAILED ======");
+    console.error("[API] ❌ Exception:", error?.message);
     throw error;
   }
 }

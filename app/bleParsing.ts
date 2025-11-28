@@ -5,21 +5,25 @@ import { NewDetectionInput } from "./api";
 // Track an approximate boot time (epoch ms) for the current connection
 let bootEpochMs: number | null = null;
 
+// Throttle logging - only log every Nth packet
+let packetCount = 0;
+const LOG_EVERY_N_PACKETS = 10;
+
 export function parseBleNotificationPacket(
   buf: ArrayBuffer,
   eventId: string | null
 ): NewDetectionInput | null {
   const bytes = new Uint8Array(buf);
-  console.log("BLE parse: packet len =", bytes.length);
-
-  const hex = Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join(" ");
-  console.log("BLE parse: hex =", hex);
+  
+  packetCount++;
+  const shouldLog = packetCount % LOG_EVERY_N_PACKETS === 0;
+  
+  if (shouldLog) {
+    console.log(`[BLE] Processed ${packetCount} packets (${bytes.length} bytes)`);
+  }
 
   // --- CASE 1: struct packet (80 bytes) ---
   if (bytes.length === 80) {
-    console.log("*** DETECTED 80-BYTE STRUCT PACKET ***");
     try {
       const view = new DataView(buf);
 
@@ -31,7 +35,6 @@ export function parseBleNotificationPacket(
         macStr += String.fromCharCode(macBytes[i]);
       }
       macStr = macStr.trim();
-      console.log("Parsed MAC string:", macStr);
 
       const macMatch = macStr.match(/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/);
       const mac = (macMatch ? macMatch[0] : macStr).toUpperCase();
@@ -39,7 +42,6 @@ export function parseBleNotificationPacket(
       // int8_t curr_rssi, rssi (offset 30, 31)
       const currRssi = view.getInt8(30);
       const avgRssi = view.getInt8(31);
-      console.log("Parsed RSSI values - curr:", currRssi, "avg:", avgRssi);
 
       // Decide which RSSI to use in the final detection
       let selectedRssi: number | null = null;
@@ -56,15 +58,11 @@ export function parseBleNotificationPacket(
         selectedRssi = null; // weird / corrupt case
       }
 
-      console.log("Selected RSSI:", selectedRssi);
-
       // uint32_t timestamp (offset 32, little-endian)
       const rawTimestamp = view.getUint32(32, true);
-      console.log("Parsed timestamp:", rawTimestamp);
 
       // float distance (offset 36, little-endian)
       const distance = view.getFloat32(36, true);
-      console.log("Parsed distance:", distance);
 
       // uuid_str[40] (offset 40-79) - extract null-terminated string
       const uuidBytes = bytes.slice(40, 80);
@@ -74,26 +72,17 @@ export function parseBleNotificationPacket(
         uuidStr += String.fromCharCode(uuidBytes[i]);
       }
       uuidStr = uuidStr.trim();
-      console.log("Parsed UUID string:", uuidStr);
 
       // Initialize approximate boot time on first packet
       if (bootEpochMs == null) {
         bootEpochMs = Date.now() - rawTimestamp * 1000;
-        console.log("[BLE] estimated bootEpochMs =", new Date(bootEpochMs).toISOString());
       }
 
       const detectedAt = new Date(bootEpochMs + rawTimestamp * 1000).toISOString();
 
-      console.log("BLE struct parsed:", {
-        mac,
-        currRssi,
-        avgRssi,
-        selectedRssi,
-        rawTimestamp,
-        distance,
-        uuidStr,
-        detectedAt,
-      });
+      if (shouldLog) {
+        console.log(`[BLE] ✓ ${mac} | RSSI: ${selectedRssi} | Dist: ${distance.toFixed(1)}m`);
+      }
 
       const detection: NewDetectionInput = {
         event_id: eventId,
@@ -116,18 +105,19 @@ export function parseBleNotificationPacket(
 
   // --- CASE 2: fallback 20-byte ASCII MAC packets ---
   if (bytes.length >= 10 && bytes.length < 80) {
-    console.log("*** Using fallback 20-byte MAC parsing ***");
     const asciiRaw = Buffer.from(bytes).toString("ascii");
     const ascii = asciiRaw.split("\0")[0].trim();
-    console.log("BLE parse (fallback ASCII):", JSON.stringify(ascii));
 
     const match = ascii.match(/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/);
     if (!match) {
-      console.log("parseBleNotificationPacket: no MAC found in fallback packet");
       return null;
     }
 
     const mac = match[0].toUpperCase();
+    
+    if (shouldLog) {
+      console.log(`[BLE] ✓ ${mac} (fallback)`);
+    }
 
     const detection: NewDetectionInput = {
       event_id: eventId,
@@ -140,16 +130,14 @@ export function parseBleNotificationPacket(
       detected_at: new Date().toISOString(),
     };
 
-    console.log("parseBleNotificationPacket: fallback detection", detection);
     return detection;
   }
 
-  console.log("parseBleNotificationPacket: unknown packet size, ignoring");
   return null;
 }
 
 // Call this when disconnecting to reset state
 export function resetBleParser() {
   bootEpochMs = null;
-  console.log("BLE parser state reset");
+  packetCount = 0;
 }
