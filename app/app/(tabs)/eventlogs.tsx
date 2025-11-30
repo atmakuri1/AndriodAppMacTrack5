@@ -1,590 +1,285 @@
-// app/(tabs)/eventlogs.tsx - With Search Mode
+// app/(tabs)/eventlogs.tsx - Simplified Device List
 import React, { useEffect, useState, useRef } from "react";
-import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  ActivityIndicator,
-  RefreshControl,
-  Platform,
-  StyleSheet,
-  TextInput,
-  Pressable,
-} from "react-native";
+import { View, Text, FlatList, Pressable, ActivityIndicator, RefreshControl, Platform, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { getDeviceMacSummaries, DeviceMacSummary } from "../../api";
 import { Ionicons } from "@expo/vector-icons";
 
-type TimeFilter = 'all' | 'search';
+const MONO = Platform.select({ ios: "Menlo", android: "monospace" });
 
-// Header stats component
-const HeaderStats = ({ 
-  totalDevices, 
-  totalDetections, 
-  recentCount 
-}: { 
-  totalDevices: number; 
-  totalDetections: number; 
-  recentCount: number; 
-}) => (
-  <View style={s.headerStats}>
-    {[
-      { icon: "hardware-chip", value: totalDevices, label: "Devices" },
-      { icon: "radio", value: totalDetections, label: "Detections" },
-      { icon: "time", value: recentCount, label: "Recent" }
-    ].map((stat, i) => (
-      <View key={i} style={s.statBadge}>
-        <Ionicons name={stat.icon as any} size={16} color="#5cd6ff" />
-        <View>
-          <Text style={s.statValue}>{stat.value}</Text>
-          <Text style={s.statLabel}>{stat.label}</Text>
-        </View>
-      </View>
-    ))}
-  </View>
-);
+// Time formatting helper
+const getTimeAgo = (dateString: string) => {
+  const diff = Date.now() - new Date(dateString).getTime();
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${days}d ago`;
+};
 
-// Empty state component
-const EmptyState = ({ hasFilters, onClear }: { hasFilters: boolean; onClear: () => void }) => (
-  <View style={s.centerContainer}>
-    <Ionicons 
-      name={hasFilters ? "filter-outline" : "calendar-outline"} 
-      size={64} 
-      color="#3a4b5c" 
-    />
-    <Text style={s.emptyTitle}>
-      {hasFilters ? "No Recent Devices" : "No Devices Yet"}
-    </Text>
-    <Text style={s.emptySubtitle}>
-      {hasFilters ? "No devices detected in the last 10 minutes" : "Start tracking by syncing your BluStick device"}
-    </Text>
-    {hasFilters && (
-      <Pressable onPress={onClear} style={s.actionBtn}>
-        <Text style={s.actionBtnText}>View All Devices</Text>
-      </Pressable>
-    )}
-  </View>
-);
-
-// Loading skeleton
-const SkeletonCard = () => (
-  <View style={s.card}>
-    <View style={[s.skeleton, { width: 150, height: 16, marginBottom: 10 }]} />
-    <View style={[s.skeleton, { width: 100, height: 12, marginBottom: 8 }]} />
-    <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12 }}>
-      <View style={[s.skeleton, { width: 120, height: 12 }]} />
-      <View style={[s.skeleton, { width: 120, height: 12 }]} />
-    </View>
-  </View>
-);
+// Check if device was seen in last 10 minutes
+const isRecent = (dateString: string) => {
+  return Date.now() - new Date(dateString).getTime() < 10 * 60 * 1000;
+};
 
 export default function EventLogsScreen() {
   const router = useRouter();
-  const [allRows, setAllRows] = useState<DeviceMacSummary[]>([]);
-  const [filteredRows, setFilteredRows] = useState<DeviceMacSummary[]>([]);
+  const [devices, setDevices] = useState<DeviceMacSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [timeFilter, setTimeFilter] = useState<TimeFilter>('all');
-  
-  const autoRefreshInterval = useRef<NodeJS.Timeout | null>(null);
+  const [showRecentOnly, setShowRecentOnly] = useState(false);
+  const autoRefresh = useRef<NodeJS.Timeout | null>(null);
 
-  const loadRows = async () => {
+  const loadDevices = async () => {
     try {
       setError(null);
       if (!refreshing) setLoading(true);
-
       const data = await getDeviceMacSummaries();
-      const sorted = data.sort((a, b) => {
-        const timeDiff = new Date(b.last_seen).getTime() - new Date(a.last_seen).getTime();
-        return timeDiff !== 0 ? timeDiff : b.detection_count - a.detection_count;
-      });
-      setAllRows(sorted);
-      applyFilters(sorted, searchQuery, timeFilter);
+      // Sort by last seen (newest first)
+      const sorted = data.sort((a, b) => 
+        new Date(b.last_seen).getTime() - new Date(a.last_seen).getTime()
+      );
+      setDevices(sorted);
     } catch (e: any) {
-      console.error("[EventLogs] failed:", e);
-      setError(e?.message || "Failed to load device logs");
+      setError(e?.message || "Failed to load devices");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   };
 
-  const applyFilters = (
-    data: DeviceMacSummary[], 
-    search: string, 
-    time: TimeFilter
-  ) => {
-    let filtered = [...data];
-
-    if (search.trim()) {
-      const query = search.toLowerCase();
-      filtered = filtered.filter(row => 
-        row.mac_address.toLowerCase().includes(query)
-      );
-    }
-
-    if (time === 'search') {
-      const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-      filtered = filtered.filter(row => 
-        new Date(row.last_seen).getTime() > tenMinutesAgo
-      );
-    }
-
-    setFilteredRows(filtered);
-  };
-
-  // Setup auto-refresh when in Search Mode
+  // Auto-refresh when showing recent only
   useEffect(() => {
-    if (timeFilter === 'search') {
-      // Refresh every 10 seconds when in search mode
-      autoRefreshInterval.current = setInterval(() => {
-        loadRows();
-      }, 10000);
+    if (showRecentOnly) {
+      autoRefresh.current = setInterval(loadDevices, 10000);
     } else {
-      // Clear interval when not in search mode
-      if (autoRefreshInterval.current) {
-        clearInterval(autoRefreshInterval.current);
-        autoRefreshInterval.current = null;
-      }
+      if (autoRefresh.current) clearInterval(autoRefresh.current);
     }
+    return () => { if (autoRefresh.current) clearInterval(autoRefresh.current); };
+  }, [showRecentOnly]);
 
-    // Cleanup on unmount
-    return () => {
-      if (autoRefreshInterval.current) {
-        clearInterval(autoRefreshInterval.current);
-      }
-    };
-  }, [timeFilter]);
+  useEffect(() => { loadDevices(); }, []);
 
-  useEffect(() => {
-    loadRows();
-  }, []);
+  // Filter devices
+  const displayedDevices = showRecentOnly 
+    ? devices.filter(d => isRecent(d.last_seen))
+    : devices;
 
-  useEffect(() => {
-    applyFilters(allRows, searchQuery, timeFilter);
-  }, [searchQuery, timeFilter, allRows]);
+  const recentCount = devices.filter(d => isRecent(d.last_seen)).length;
+  const totalDetections = devices.reduce((sum, d) => sum + d.detection_count, 0);
 
-  const getTimeAgo = (dateString: string) => {
-    const diff = Date.now() - new Date(dateString).getTime();
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return `${days}d ago`;
+  // Navigate to detections filtered by MAC
+  const viewDevice = (mac: string) => {
+    router.push({ pathname: "/(tabs)/detections", params: { mac } });
   };
 
-  const totalDevices = allRows.length;
-  const totalDetections = allRows.reduce((sum, row) => sum + row.detection_count, 0);
-  const recentCount = allRows.filter(row => 
-    new Date(row.last_seen).getTime() > Date.now() - (10 * 60 * 1000)
-  ).length;
-
-  const hasFilters = searchQuery.trim() !== "" || timeFilter === 'search';
-  const clearFilters = () => {
-    setSearchQuery("");
-    setTimeFilter('all');
+  // Navigate to map for this MAC
+  const viewOnMap = (mac: string) => {
+    router.push({ pathname: "/(tabs)/map", params: { mac } });
   };
 
-  const timeFilters: { value: TimeFilter; label: string; icon: string }[] = [
-    { value: 'all', label: 'All', icon: 'list' },
-    { value: 'search', label: 'Search Mode', icon: 'scan' },
-  ];
+  // Render device card
+  const renderDevice = ({ item }: { item: DeviceMacSummary }) => {
+    const recent = isRecent(item.last_seen);
+    
+    return (
+      <Pressable style={[styles.card, recent && styles.cardRecent]} onPress={() => viewDevice(item.mac_address)}>
+        <View style={styles.cardHeader}>
+          <View style={[styles.iconCircle, recent && styles.iconCircleRecent]}>
+            <Ionicons name="bluetooth" size={18} color={recent ? "#4cd964" : "#5cd6ff"} />
+          </View>
+          <View style={styles.cardInfo}>
+            <Text style={[styles.mac, { fontFamily: MONO }]}>{item.mac_address}</Text>
+            <Text style={[styles.timeAgo, recent && styles.timeAgoRecent]}>
+              {recent && "● "}{getTimeAgo(item.last_seen)}
+            </Text>
+          </View>
+          
+          {/* Quick actions */}
+          <Pressable style={styles.mapBtn} onPress={() => viewOnMap(item.mac_address)}>
+            <Ionicons name="map-outline" size={18} color="#5cd6ff" />
+          </Pressable>
+          <Ionicons name="chevron-forward" size={18} color="#7f8a99" />
+        </View>
+
+        <View style={styles.cardStats}>
+          <View style={styles.stat}>
+            <Ionicons name="radio-outline" size={12} color="#7f8a99" />
+            <Text style={styles.statText}>{item.detection_count} detections</Text>
+          </View>
+          <View style={styles.stat}>
+            <Ionicons name="calendar-outline" size={12} color="#7f8a99" />
+            <Text style={styles.statText}>Since {new Date(item.first_seen).toLocaleDateString()}</Text>
+          </View>
+        </View>
+      </Pressable>
+    );
+  };
 
   return (
-    <SafeAreaView style={s.root}>
-      <View style={s.headerLine} />
+    <SafeAreaView style={styles.root}>
+      <View style={styles.divider} />
 
-      {!loading && !error && allRows.length > 0 && (
-        <HeaderStats 
-          totalDevices={totalDevices}
-          totalDetections={totalDetections}
-          recentCount={recentCount}
-        />
+      {/* Stats Header */}
+      {!loading && !error && devices.length > 0 && (
+        <View style={styles.statsHeader}>
+          <View style={styles.statBox}>
+            <Text style={styles.statNum}>{devices.length}</Text>
+            <Text style={styles.statLabel}>Devices</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statNum}>{totalDetections}</Text>
+            <Text style={styles.statLabel}>Detections</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={[styles.statNum, recentCount > 0 && styles.statNumRecent]}>{recentCount}</Text>
+            <Text style={styles.statLabel}>Recent</Text>
+          </View>
+        </View>
       )}
 
-      {/* Search Bar */}
-      <View style={s.searchContainer}>
-        <View style={s.searchBar}>
-          <Ionicons name="search" size={18} color="#9aa4b2" />
-          <TextInput
-            style={s.searchInput}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            placeholder="Search by MAC address..."
-            placeholderTextColor="#9aa4b2"
-          />
-          {searchQuery.length > 0 && (
-            <Pressable onPress={() => setSearchQuery("")}>
-              <Ionicons name="close-circle" size={18} color="#9aa4b2" />
-            </Pressable>
+      {/* Filter Toggle */}
+      <View style={styles.filterRow}>
+        <Pressable 
+          style={[styles.filterBtn, !showRecentOnly && styles.filterBtnActive]}
+          onPress={() => setShowRecentOnly(false)}
+        >
+          <Ionicons name="list" size={14} color={!showRecentOnly ? "#0b1420" : "#5cd6ff"} />
+          <Text style={[styles.filterText, !showRecentOnly && styles.filterTextActive]}>All</Text>
+        </Pressable>
+        <Pressable 
+          style={[styles.filterBtn, showRecentOnly && styles.filterBtnActive]}
+          onPress={() => setShowRecentOnly(true)}
+        >
+          <Ionicons name="time" size={14} color={showRecentOnly ? "#0b1420" : "#5cd6ff"} />
+          <Text style={[styles.filterText, showRecentOnly && styles.filterTextActive]}>Recent</Text>
+          {recentCount > 0 && (
+            <View style={styles.filterBadge}>
+              <Text style={styles.filterBadgeText}>{recentCount}</Text>
+            </View>
           )}
-        </View>
+        </Pressable>
       </View>
 
-      {/* Mode Toggle */}
-      <View style={s.filterChipsContainer}>
-        {timeFilters.map((filter) => (
-          <Pressable 
-            key={filter.value}
-            onPress={() => setTimeFilter(filter.value)}
-            style={[s.filterChip, timeFilter === filter.value && s.filterChipActive]}
-          >
-            <Ionicons 
-              name={filter.icon as any} 
-              size={14} 
-              color={timeFilter === filter.value ? "#0b1420" : "#5cd6ff"} 
-            />
-            <Text style={[s.filterChipText, timeFilter === filter.value && s.filterChipTextActive]}>
-              {filter.label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-
-      {/* Results Count with Auto-refresh indicator */}
+      {/* Results count + auto-refresh indicator */}
       {!loading && !error && (
-        <View style={s.resultsBar}>
-          <Text style={s.resultsText}>
-            {filteredRows.length === allRows.length 
-              ? `${filteredRows.length} device${filteredRows.length === 1 ? '' : 's'}`
-              : `${filteredRows.length} of ${allRows.length} device${allRows.length === 1 ? '' : 's'}`
-            }
+        <View style={styles.resultsRow}>
+          <Text style={styles.resultsText}>
+            {displayedDevices.length} device{displayedDevices.length !== 1 ? "s" : ""}
           </Text>
-          {timeFilter === 'search' && (
-            <View style={s.autoRefreshBadge}>
-              <View style={s.pulseDot} />
-              <Text style={s.autoRefreshText}>Auto-refreshing</Text>
+          {showRecentOnly && (
+            <View style={styles.autoRefresh}>
+              <View style={styles.pulseDot} />
+              <Text style={styles.autoRefreshText}>Auto-refresh</Text>
             </View>
           )}
         </View>
       )}
 
+      {/* Content */}
       {loading ? (
-        <View style={s.listContent}>
-          {[1, 2, 3].map(i => <SkeletonCard key={i} />)}
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color="#5cd6ff" />
         </View>
       ) : error ? (
-        <View style={s.centerContainer}>
-          <Ionicons name="alert-circle-outline" size={48} color="#ff6b6b" />
-          <Text style={s.errorText}>{error}</Text>
-          <Pressable onPress={loadRows} style={s.actionBtn}>
-            <Text style={s.actionBtnText}>Try Again</Text>
+        <View style={styles.centered}>
+          <Ionicons name="alert-circle" size={48} color="#ff6b6b" />
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable style={styles.retryBtn} onPress={loadDevices}>
+            <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
-      ) : filteredRows.length === 0 ? (
-        <EmptyState hasFilters={timeFilter === 'search'} onClear={clearFilters} />
+      ) : displayedDevices.length === 0 ? (
+        <View style={styles.centered}>
+          <Ionicons name={showRecentOnly ? "time-outline" : "bluetooth-outline"} size={56} color="#3a4b5c" />
+          <Text style={styles.emptyTitle}>
+            {showRecentOnly ? "No Recent Devices" : "No Devices Yet"}
+          </Text>
+          <Text style={styles.emptySubtitle}>
+            {showRecentOnly 
+              ? "No devices detected in the last 10 minutes" 
+              : "Go to Detections tab and connect your BluStick"}
+          </Text>
+          {showRecentOnly && (
+            <Pressable style={styles.retryBtn} onPress={() => setShowRecentOnly(false)}>
+              <Text style={styles.retryText}>Show All</Text>
+            </Pressable>
+          )}
+        </View>
       ) : (
         <FlatList
-          data={filteredRows}
+          data={displayedDevices}
           keyExtractor={(item) => item.mac_address}
+          renderItem={renderDevice}
+          contentContainerStyle={styles.list}
+          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           refreshControl={
             <RefreshControl 
               refreshing={refreshing} 
-              onRefresh={() => { setRefreshing(true); loadRows(); }}
-              tintColor="#5cd6ff"
+              onRefresh={() => { setRefreshing(true); loadDevices(); }} 
+              tintColor="#5cd6ff" 
             />
           }
-          contentContainerStyle={s.listContent}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={s.card}
-              onPress={() =>
-                router.push({
-                  pathname: "/detections",
-                  params: { mac: item.mac_address },
-                })
-              }
-              activeOpacity={0.7}
-            >
-              {/* Card Header */}
-              <View style={s.cardTop}>
-                <View style={s.iconContainer}>
-                  <Ionicons name="bluetooth" size={20} color="#5cd6ff" />
-                </View>
-                <View style={s.cardTopContent}>
-                  <Text style={s.macAddress}>{item.mac_address}</Text>
-                  <Text style={s.timeAgo}>{getTimeAgo(item.last_seen)}</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={20} color="#9aa4b2" />
-              </View>
-
-              {/* Stats Row */}
-              <View style={s.statsRow}>
-                <Ionicons name="radio-outline" size={14} color="#7a8a9e" />
-                <Text style={s.statText}>
-                  {item.detection_count} detection{item.detection_count === 1 ? '' : 's'}
-                </Text>
-              </View>
-
-              {/* Timestamps */}
-              <View style={s.timestampRow}>
-                <View style={s.timestampCol}>
-                  <Text style={s.timestampLabel}>First seen</Text>
-                  <Text style={s.timestampValue}>
-                    {new Date(item.first_seen).toLocaleDateString()}
-                  </Text>
-                </View>
-                <View style={s.timestampDivider} />
-                <View style={s.timestampCol}>
-                  <Text style={s.timestampLabel}>Last seen</Text>
-                  <Text style={s.timestampValue}>
-                    {new Date(item.last_seen).toLocaleDateString()}
-                  </Text>
-                </View>
-              </View>
-            </TouchableOpacity>
-          )}
         />
       )}
     </SafeAreaView>
   );
 }
 
-const s = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: "#0b1420",
-  },
-  headerLine: {
-    height: 1,
-    backgroundColor: "rgba(92,214,255,0.12)",
-  },
-  headerStats: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: "rgba(18,28,44,0.6)",
-    marginHorizontal: 16,
-    marginTop: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.15)",
-  },
-  statBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  statValue: {
-    color: "#5cd6ff",
-    fontSize: 18,
-    fontWeight: "700",
-  },
-  statLabel: {
-    color: "#9aa4b2",
-    fontSize: 11,
-  },
-  searchContainer: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-  },
-  searchBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#0f1a2a",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.25)",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 10,
-  },
-  searchInput: {
-    flex: 1,
-    color: "#e6edf5",
-    fontSize: 14,
-  },
-  filterChipsContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 12,
-  },
-  filterChip: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.3)",
-    backgroundColor: "rgba(35,184,240,0.08)",
-  },
-  filterChipActive: {
-    backgroundColor: "#5cd6ff",
-    borderColor: "#5cd6ff",
-  },
-  filterChipText: {
-    color: "#5cd6ff",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  filterChipTextActive: {
-    color: "#0b1420",
-    fontWeight: "700",
-  },
-  resultsBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-  },
-  resultsText: {
-    color: "#9aa4b2",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  autoRefreshBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: "rgba(92,214,255,0.1)",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.3)",
-  },
-  pulseDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#5cd6ff",
-  },
-  autoRefreshText: {
-    color: "#5cd6ff",
-    fontSize: 10,
-    fontWeight: "600",
-  },
-  centerContainer: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
-    gap: 12,
-  },
-  errorText: {
-    color: "#ff6b6b",
-    textAlign: "center",
-    fontSize: 14,
-  },
-  actionBtn: {
-    marginTop: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: "rgba(92,214,255,0.1)",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.3)",
-  },
-  actionBtnText: {
-    color: "#5cd6ff",
-    fontWeight: "600",
-    fontSize: 14,
-  },
-  emptyTitle: {
-    color: "#e6edf5",
-    fontSize: 18,
-    fontWeight: "700",
-    marginTop: 8,
-  },
-  emptySubtitle: {
-    color: "#9aa4b2",
-    fontSize: 14,
-    textAlign: "center",
-  },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 24,
-    paddingTop: 8,
-  },
-  card: {
-    marginBottom: 12,
-    padding: 14,
-    borderRadius: 12,
-    backgroundColor: "rgba(18,28,44,0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.25)",
-  },
-  cardTop: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 12,
-    gap: 12,
-  },
-  iconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "rgba(92,214,255,0.1)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  cardTopContent: {
-    flex: 1,
-  },
-  macAddress: {
-    color: "#e6edf5",
-    fontSize: 15,
-    fontWeight: "700",
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }) as any,
-    marginBottom: 2,
-  },
-  timeAgo: {
-    color: "#7a8a9e",
-    fontSize: 12,
-  },
-  statsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginBottom: 12,
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: "rgba(92,214,255,0.1)",
-  },
-  statText: {
-    color: "#9aa4b2",
-    fontSize: 12,
-  },
-  timestampRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  timestampCol: {
-    flex: 1,
-  },
-  timestampDivider: {
-    width: 1,
-    height: 24,
-    backgroundColor: "rgba(92,214,255,0.15)",
-  },
-  timestampLabel: {
-    color: "#7a8a9e",
-    fontSize: 10,
-    marginBottom: 3,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-  timestampValue: {
-    color: "#c9d5e3",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  skeleton: {
-    backgroundColor: "rgba(92,214,255,0.1)",
-    borderRadius: 4,
-  },
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#0b1420" },
+  divider: { height: 1, backgroundColor: "rgba(92,214,255,0.12)" },
+
+  // Stats Header
+  statsHeader: { flexDirection: "row", justifyContent: "space-around", margin: 12, padding: 12, backgroundColor: "rgba(18,28,44,0.8)", borderRadius: 10, borderWidth: 1, borderColor: "rgba(92,214,255,0.15)" },
+  statBox: { alignItems: "center" },
+  statNum: { color: "#5cd6ff", fontSize: 20, fontWeight: "800" },
+  statNumRecent: { color: "#4cd964" },
+  statLabel: { color: "#7f8a99", fontSize: 11, marginTop: 2 },
+
+  // Filter Row
+  filterRow: { flexDirection: "row", paddingHorizontal: 12, gap: 10, marginBottom: 8 },
+  filterBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)", backgroundColor: "rgba(92,214,255,0.08)" },
+  filterBtnActive: { backgroundColor: "#5cd6ff", borderColor: "#5cd6ff" },
+  filterText: { color: "#5cd6ff", fontSize: 13, fontWeight: "600" },
+  filterTextActive: { color: "#0b1420", fontWeight: "700" },
+  filterBadge: { backgroundColor: "#4cd964", paddingHorizontal: 6, paddingVertical: 1, borderRadius: 8 },
+  filterBadgeText: { color: "#fff", fontSize: 10, fontWeight: "700" },
+
+  // Results Row
+  resultsRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 14, paddingBottom: 6 },
+  resultsText: { color: "#7f8a99", fontSize: 12 },
+  autoRefresh: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 8, paddingVertical: 3, backgroundColor: "rgba(92,214,255,0.1)", borderRadius: 10 },
+  pulseDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#5cd6ff" },
+  autoRefreshText: { color: "#5cd6ff", fontSize: 10 },
+
+  // List
+  list: { padding: 12 },
+
+  // Card
+  card: { backgroundColor: "rgba(18,28,44,0.9)", borderRadius: 10, padding: 12, borderWidth: 1, borderColor: "rgba(92,214,255,0.15)" },
+  cardRecent: { borderColor: "rgba(76,217,100,0.4)", borderLeftWidth: 3, borderLeftColor: "#4cd964" },
+  cardHeader: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 },
+  iconCircle: { width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(92,214,255,0.1)", alignItems: "center", justifyContent: "center" },
+  iconCircleRecent: { backgroundColor: "rgba(76,217,100,0.15)" },
+  cardInfo: { flex: 1 },
+  mac: { color: "#e6edf5", fontSize: 14, fontWeight: "700" },
+  timeAgo: { color: "#7f8a99", fontSize: 11, marginTop: 2 },
+  timeAgoRecent: { color: "#4cd964" },
+  mapBtn: { padding: 8, borderRadius: 6, backgroundColor: "rgba(92,214,255,0.1)" },
+  cardStats: { flexDirection: "row", gap: 16, paddingTop: 10, borderTopWidth: 1, borderTopColor: "rgba(92,214,255,0.1)" },
+  stat: { flexDirection: "row", alignItems: "center", gap: 5 },
+  statText: { color: "#9aa4b2", fontSize: 11 },
+
+  // States
+  centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: 24 },
+  errorText: { color: "#ff6b6b", fontSize: 13, textAlign: "center" },
+  retryBtn: { paddingHorizontal: 20, paddingVertical: 10, backgroundColor: "rgba(92,214,255,0.1)", borderRadius: 8, borderWidth: 1, borderColor: "rgba(92,214,255,0.3)", marginTop: 8 },
+  retryText: { color: "#5cd6ff", fontWeight: "600" },
+  emptyTitle: { color: "#e6edf5", fontSize: 17, fontWeight: "700" },
+  emptySubtitle: { color: "#7f8a99", fontSize: 13, textAlign: "center" },
 });
