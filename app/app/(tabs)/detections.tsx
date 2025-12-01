@@ -171,18 +171,28 @@ export default function DetectionsScreen() {
   const recent = () => Array.from(recentMacs.values()).filter(m => m.lastSeen.getTime() >= Date.now()-600000).sort((a,b)=>b.count-a.count).slice(0,12);
 
   const renderItem = useCallback(({item}: {item:DetectionRow}) => (
-    <View style={s.card}>
+    <Pressable 
+      style={({pressed}) => [s.card, pressed && s.cardPressed]}
+      onPress={() => {
+        if (item.mac_address) {
+          router.push({pathname: "/(tabs)/map" as any, params: {mac: item.mac_address}});
+        }
+      }}
+    >
       <View style={s.row}>
         <Text style={[s.mac,{fontFamily:MONO}]}>{item.mac_address??"unknown"}</Text>
-        {item.signal_type && <View style={s.badge}><Text style={s.badgeText}>{item.signal_type}</Text></View>}
+        <View style={s.rowRight}>
+          {item.signal_type && <View style={s.badge}><Text style={s.badgeText}>{item.signal_type}</Text></View>}
+          <Ionicons name="map-outline" size={14} color="#5cd6ff" style={{marginLeft: 8}} />
+        </View>
       </View>
       <View style={s.stats}>
         <SignalBars rssi={item.rssi} />
         <Text style={s.stat}>{item.estimated_distance?.toFixed(1)??"—"}m</Text>
         <Text style={s.stat}>{new Date(item.detected_at).toLocaleTimeString()}</Text>
       </View>
-    </View>
-  ), []);
+    </Pressable>
+  ), [router]);
 
   const recentList = recent();
 
@@ -295,6 +305,9 @@ export default function DetectionsScreen() {
             ) : <Text style={s.filterLbl}>All detections</Text>}
             <View style={s.cnt}><Text style={s.cntTxt}>{detections.length}</Text></View>
           </View>
+
+          {/* Hint for tappable cards */}
+          <Text style={s.tapHint}>Tap a detection to view on map</Text>
         </>}
         ListEmptyComponent={loading ? <View style={s.ctr}><ActivityIndicator size="large" color="#5cd6ff" /></View> : error ? (
           <View style={s.ctr}><Ionicons name="alert-circle" size={44} color="#ff6b6b" /><Text style={s.err}>{error}</Text><Pressable style={s.retry} onPress={()=>load(filterMac)}><Text style={s.retryTxt}>Retry</Text></Pressable></View>
@@ -310,7 +323,9 @@ const s = StyleSheet.create({
   root:{flex:1,backgroundColor:"#0b1420"},div:{height:1,backgroundColor:"rgba(92,214,255,0.12)"},list:{padding:12},
   signalBars:{flexDirection:"row",alignItems:"flex-end",gap:2},bar:{width:3,borderRadius:1},rssi:{color:"#7f8a99",fontSize:10,marginLeft:4},
   card:{backgroundColor:"rgba(18,28,44,0.9)",borderRadius:8,padding:12,borderWidth:1,borderColor:"rgba(92,214,255,0.15)"},
+  cardPressed:{backgroundColor:"rgba(35,184,240,0.15)",borderColor:"rgba(92,214,255,0.4)"},
   row:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",marginBottom:8},
+  rowRight:{flexDirection:"row",alignItems:"center"},
   mac:{color:"#e6edf5",fontWeight:"700",fontSize:13},badge:{backgroundColor:"rgba(92,214,255,0.15)",paddingHorizontal:6,paddingVertical:2,borderRadius:4},
   badgeText:{color:"#5cd6ff",fontSize:9,fontWeight:"600"},stats:{flexDirection:"row",alignItems:"center",gap:12},stat:{color:"#9aa4b2",fontSize:11},
   liveBox:{backgroundColor:"rgba(255,59,48,0.08)",borderWidth:2,borderColor:"#ff3b30",borderRadius:12,marginBottom:12,overflow:"hidden"},
@@ -342,10 +357,11 @@ const s = StyleSheet.create({
   devName:{color:"#e6edf5",fontSize:13,fontWeight:"600"},devId:{color:"#7f8a99",fontSize:9,marginTop:2},
   liveBtn:{flexDirection:"row",alignItems:"center",gap:4,backgroundColor:"#ff3b30",paddingHorizontal:12,paddingVertical:8,borderRadius:6},
   liveBtnTxt:{color:"#fff",fontSize:12,fontWeight:"700"},
-  filterBar:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",paddingHorizontal:4,paddingVertical:8,marginBottom:8},
+  filterBar:{flexDirection:"row",justifyContent:"space-between",alignItems:"center",paddingHorizontal:4,paddingVertical:8,marginBottom:4},
   filterLbl:{color:"#9aa4b2",fontSize:12},filterActive:{flexDirection:"row",alignItems:"center",gap:6,backgroundColor:"rgba(92,214,255,0.1)",paddingHorizontal:10,paddingVertical:5,borderRadius:6,flex:1,marginRight:10},
   filterTxt:{color:"#5cd6ff",fontSize:12,fontWeight:"600",flex:1},clear:{padding:2},cnt:{backgroundColor:"rgba(92,214,255,0.15)",paddingHorizontal:8,paddingVertical:3,borderRadius:10},
   cntTxt:{color:"#5cd6ff",fontSize:11,fontWeight:"700"},
+  tapHint:{color:"#7f8a99",fontSize:11,textAlign:"center",marginBottom:8,fontStyle:"italic"},
   ctr:{alignItems:"center",paddingVertical:40,gap:10},err:{color:"#ff6b6b",fontSize:13},retry:{paddingHorizontal:20,paddingVertical:10,backgroundColor:"rgba(92,214,255,0.1)",borderRadius:8,marginTop:8},
   retryTxt:{color:"#5cd6ff",fontWeight:"600"},empty:{color:"#e6edf5",fontSize:16,fontWeight:"700"},emptySub:{color:"#7f8a99",fontSize:12,textAlign:"center"},
 });
