@@ -11,7 +11,6 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
 import {
   getObservations,
   createObservation,
@@ -29,14 +28,10 @@ export default function ObservationsScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const [me, data] = await Promise.all([
-          getMe(),
-          getObservations(100),
-        ]);
+        const [me, data] = await Promise.all([getMe(), getObservations(100)]);
         setUsername(me.username);
         setRows(data);
       } catch (e: any) {
-        console.warn(e);
         Alert.alert("Error", e.message || "Failed to load data");
       } finally {
         setLoading(false);
@@ -48,131 +43,140 @@ export default function ObservationsScreen() {
     if (!note.trim()) return;
     try {
       setSubmitting(true);
-      const created = await createObservation(
-        username || "Unknown",
-        note.trim()
-      );
+      const created = await createObservation(username || "Unknown", note.trim());
       setRows((prev) => [created, ...prev]);
       setNote("");
     } catch (e: any) {
-      console.warn(e);
-      Alert.alert("Error", e.message || "Failed to submit observation");
+      Alert.alert("Error", e.message || "Failed to submit");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const formatDate = (iso: string) => {
-    const d = new Date(iso);
-    return d.toLocaleString();
+  const formatTime = (iso: string) => {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h`;
+    return `${Math.floor(hrs / 24)}d`;
   };
 
   return (
-    <SafeAreaView style={s.root}>
-      <View style={s.headerLine} />
-      <ScrollView style={s.content} keyboardShouldPersistTaps="handled">
-        {/* Observer info banner */}
-        <View style={s.observerBanner}>
-          <Text style={s.observerLabel}>Observing as:</Text>
-          <Text style={s.observerValue}>
-            {username || "Loading…"}
-          </Text>
-        </View>
+    <SafeAreaView style={s.root} edges={["left", "right", "bottom"]}>
+      <View style={s.header}>
+        <Text style={s.label}>User:</Text>
+        <Text style={s.user}>{username || "..."}</Text>
+      </View>
 
-        <Text style={s.label}>Observation</Text>
-        <View style={s.box}>
+      <ScrollView style={s.content} keyboardShouldPersistTaps="handled">
+        <View style={s.inputBox}>
           <TextInput
-            style={[s.input, { minHeight: 90, textAlignVertical: "top" }]}
+            style={s.input}
             value={note}
             onChangeText={setNote}
-            placeholder="Enter your observation details"
-            placeholderTextColor="#9aa4b2"
+            placeholder="What did you observe?"
+            placeholderTextColor="#5a6577"
             multiline
           />
         </View>
 
         <Pressable
           onPress={submit}
-          style={{ marginTop: 14 }}
-          disabled={submitting}
+          disabled={submitting || !note.trim()}
+          style={[s.btn, (submitting || !note.trim()) && s.btnDisabled]}
         >
-          <LinearGradient
-            colors={["#1bc0f5", "#18a9d9"]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 0 }}
-            style={[s.cta, submitting && { opacity: 0.6 }]}
-          >
-            {submitting ? (
-              <ActivityIndicator size="small" color="#0B1420" />
-            ) : (
-              <Text style={s.ctaText}>Submit Observation</Text>
-            )}
-          </LinearGradient>
+          {submitting ? (
+            <ActivityIndicator size="small" color="#0a1018" />
+          ) : (
+            <Text style={s.btnText}>Submit</Text>
+          )}
         </Pressable>
 
-        <View style={{ marginTop: 24, marginBottom: 24 }}>
-          <Text style={s.sectionTitle}>Recent Observations</Text>
-          {loading ? (
-            <ActivityIndicator size="small" color="#5cd6ff" />
-          ) : rows.length === 0 ? (
-            <Text style={s.empty}>No observations recorded yet</Text>
-          ) : (
-            rows.map((item) => (
-              <View key={item.id} style={s.card}>
-                <Text style={s.cardTitle}>
-                  {item.full_name} · {formatDate(item.created_at)}
-                </Text>
-                <Text style={s.cardLine}>Observation: {item.observation_details}</Text>
+        <Text style={s.sectionLabel}>Recent ({rows.length})</Text>
+
+        {loading ? (
+          <ActivityIndicator color="#23b8f0" style={{ marginTop: 20 }} />
+        ) : rows.length === 0 ? (
+          <Text style={s.empty}>No observations yet</Text>
+        ) : (
+          rows.map((item) => (
+            <View key={item.id} style={s.card}>
+              <View style={s.cardHeader}>
+                <Text style={s.cardName}>{item.full_name}</Text>
+                <Text style={s.cardTime}>{formatTime(item.created_at)}</Text>
               </View>
-            ))
-          )}
-        </View>
+              <Text style={s.cardText}>{item.observation_details}</Text>
+            </View>
+          ))
+        )}
+
+        <View style={{ height: 30 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0b1420" },
-  headerLine: { height: 1, backgroundColor: "rgba(92,214,255,0.12)" },
-  content: { padding: 16 },
-  
-  observerBanner: {
-    marginBottom: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    backgroundColor: "rgba(35,184,240,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.2)",
+  root: { flex: 1, backgroundColor: "#0a1018" },
+  header: {
     flexDirection: "row",
     alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(35,184,240,0.1)",
+    gap: 6,
   },
-  observerLabel: { color: "#9aa4b2", fontSize: 13, marginRight: 8 },
-  observerValue: { color: "#5cd6ff", fontSize: 15, fontWeight: "700" },
-  
-  label: { color: "#c9d5e3", fontSize: 13, marginBottom: 6 },
-  box: {
-    backgroundColor: "#0f1a2a",
+  label: { color: "#5a6577", fontSize: 14 },
+  user: { color: "#23b8f0", fontSize: 14, fontWeight: "600" },
+  content: { padding: 16 },
+  inputBox: {
+    backgroundColor: "#111a24",
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.25)",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderColor: "rgba(35,184,240,0.15)",
+    padding: 12,
+    marginBottom: 12,
   },
-  input: { color: "#e6edf5", fontSize: 15.5 },
-  cta: { borderRadius: 10, paddingVertical: 12, alignItems: "center" },
-  ctaText: { color: "#0B1420", fontWeight: "700", fontSize: 16 },
-  sectionTitle: { color: "#c9d5e3", fontSize: 15, fontWeight: "600" },
-  empty: { color: "#9aa4b2", marginTop: 8 },
+  input: {
+    color: "#e6edf5",
+    fontSize: 15,
+    minHeight: 80,
+    textAlignVertical: "top",
+  },
+  btn: {
+    backgroundColor: "#23b8f0",
+    borderRadius: 8,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginBottom: 20,
+  },
+  btnDisabled: { opacity: 0.5 },
+  btnText: { color: "#0a1018", fontWeight: "700", fontSize: 15 },
+  sectionLabel: {
+    color: "#5a6577",
+    fontSize: 12,
+    fontWeight: "600",
+    marginBottom: 10,
+    textTransform: "uppercase",
+  },
+  empty: { color: "#5a6577", fontSize: 13 },
   card: {
-    marginTop: 10,
-    padding: 10,
-    borderRadius: 10,
-    backgroundColor: "rgba(18,28,44,0.9)",
+    backgroundColor: "#111a24",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
     borderWidth: 1,
-    borderColor: "rgba(92,214,255,0.18)",
+    borderColor: "rgba(35,184,240,0.08)",
   },
-  cardTitle: { color: "#e6edf5", fontWeight: "600", marginBottom: 6 },
-  cardLine: { color: "#9aa4b2", fontSize: 12, marginBottom: 2 },
+  cardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  cardName: { color: "#e6edf5", fontSize: 13, fontWeight: "600" },
+  cardTime: { color: "#5a6577", fontSize: 11 },
+  cardText: { color: "#9aa4b2", fontSize: 13, lineHeight: 18 },
 });

@@ -60,7 +60,14 @@ function simplifyPath(
   ) => {
     const dx = b.longitude - a.longitude;
     const dy = b.latitude - a.latitude;
-    const t = Math.max(0, Math.min(1, ((p.longitude - a.longitude) * dx + (p.latitude - a.latitude) * dy) / (dx * dx + dy * dy)));
+    const t = Math.max(
+      0,
+      Math.min(
+        1,
+        ((p.longitude - a.longitude) * dx + (p.latitude - a.latitude) * dy) /
+          (dx * dx + dy * dy)
+      )
+    );
     const projX = a.longitude + t * dx;
     const projY = a.latitude + t * dy;
     return (p.longitude - projX) ** 2 + (p.latitude - projY) ** 2;
@@ -94,7 +101,9 @@ export default function MapScreen() {
 
   const [region, setRegion] = useState<Region>(DEFAULT_CENTER);
   const [allDetections, setAllDetections] = useState<DetectionRow[]>([]);
-  const [recentDevices, setRecentDevices] = useState<{ mac: string; count: number; lastSeen: string }[]>([]);
+  const [recentDevices, setRecentDevices] = useState<
+    { mac: string; count: number; lastSeen: string }[]
+  >([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [userLocation, setUserLocation] = useState<{
@@ -120,7 +129,7 @@ export default function MapScreen() {
 
     const cutoff = Date.now() - filterConfig.minutes * 60 * 1000;
     return allDetections.filter(
-      (d) => d.detected_at && new Date(d.detected_at).getTime() > cutoff
+      (d) => d.detected_at && new Date(d.detected_at!).getTime() > cutoff
     );
   }, [allDetections, timeFilter]);
 
@@ -132,17 +141,18 @@ export default function MapScreen() {
   // Sorted detections
   const sortedByTimeDesc = useMemo(
     () =>
-      [...detectionsWithCoords].sort(
-        (a, b) => {
-          const timeA = a.detected_at ? new Date(a.detected_at).getTime() : 0;
-          const timeB = b.detected_at ? new Date(b.detected_at).getTime() : 0;
-          return timeB - timeA;
-        }
-      ),
+      [...detectionsWithCoords].sort((a, b) => {
+        const timeA = a.detected_at ? new Date(a.detected_at!).getTime() : 0;
+        const timeB = b.detected_at ? new Date(b.detected_at!).getTime() : 0;
+        return timeB - timeA;
+      }),
     [detectionsWithCoords]
   );
 
-  const sortedByTimeAsc = useMemo(() => [...sortedByTimeDesc].reverse(), [sortedByTimeDesc]);
+  const sortedByTimeAsc = useMemo(
+    () => [...sortedByTimeDesc].reverse(),
+    [sortedByTimeDesc]
+  );
   const mostRecentDetection = sortedByTimeDesc[0];
 
   // Simplified path for performance
@@ -183,7 +193,10 @@ export default function MapScreen() {
     const maxDist = Math.max(...distances);
     const range = maxDist - minDist || 1; // Avoid division by zero
 
-    const segments: { coords: { latitude: number; longitude: number }[]; color: string }[] = [];
+    const segments: {
+      coords: { latitude: number; longitude: number }[];
+      color: string;
+    }[] = [];
 
     for (let i = 0; i < sortedByTimeAsc.length - 1; i++) {
       const a = sortedByTimeAsc[i];
@@ -252,20 +265,30 @@ export default function MapScreen() {
 
       data.forEach((d) => {
         if (!d.detected_at) return; // Skip if no timestamp
+
         const existing = deviceMap.get(d.mac_address);
-        if (!existing || new Date(d.detected_at) > new Date(existing.lastSeen)) {
+        const nextCount = (existing?.count ?? 0) + 1;
+
+        if (
+          !existing ||
+          new Date(d.detected_at!).getTime() >
+            new Date(existing.lastSeen).getTime()
+        ) {
           deviceMap.set(d.mac_address, {
-            count: (existing?.count ?? 0) + 1,
-            lastSeen: d.detected_at,
+            count: nextCount,
+            lastSeen: d.detected_at!,
           });
         } else {
-          deviceMap.set(d.mac_address, { ...existing, count: existing.count + 1 });
+          deviceMap.set(d.mac_address, { ...existing, count: nextCount });
         }
       });
 
       const devices = Array.from(deviceMap.entries())
         .map(([mac, info]) => ({ mac, ...info }))
-        .sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime())
+        .sort(
+          (a, b) =>
+            new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime()
+        )
         .slice(0, 10);
 
       setRecentDevices(devices);
@@ -284,7 +307,9 @@ export default function MapScreen() {
       if (!refreshing) setLoading(true);
       const data = await getDetections({ limit: 500 });
       const filtered = data.filter((d) => d.mac_address === macAddress);
-      const withCoords = filtered.filter((d) => d.latitude != null && d.longitude != null);
+      const withCoords = filtered.filter(
+        (d) => d.latitude != null && d.longitude != null
+      );
 
       if (withCoords.length > 0) {
         const lats = withCoords.map((d) => d.latitude as number);
@@ -327,7 +352,7 @@ export default function MapScreen() {
         loadDetections(macStr);
       }
     }
-  }, [macFromParams]);
+  }, [macFromParams, activeMacAddress]);
 
   const selectDevice = (mac: string) => {
     setActiveMacAddress(mac);
@@ -426,7 +451,10 @@ export default function MapScreen() {
               >
                 <Text style={s.vizModeIcon}>{mode.icon}</Text>
                 <Text
-                  style={[s.vizModeLabel, vizMode === mode.key && s.vizModeLabelActive]}
+                  style={[
+                    s.vizModeLabel,
+                    vizMode === mode.key && s.vizModeLabelActive,
+                  ]}
                 >
                   {mode.label}
                 </Text>
@@ -443,7 +471,10 @@ export default function MapScreen() {
                 onPress={() => setTimeFilter(filter.key)}
               >
                 <Text
-                  style={[s.timeBtnText, timeFilter === filter.key && s.timeBtnTextActive]}
+                  style={[
+                    s.timeBtnText,
+                    timeFilter === filter.key && s.timeBtnTextActive,
+                  ]}
                 >
                   {filter.label}
                 </Text>
@@ -468,9 +499,7 @@ export default function MapScreen() {
               {timeFilter !== "all" && ` (${timeFilter})`}
             </Text>
             {vizMode === "path" && (
-              <Text style={s.statText}>
-                Path: {simplifiedPath.length} segments
-              </Text>
+              <Text style={s.statText}>Path: {simplifiedPath.length} segments</Text>
             )}
           </View>
         </View>
@@ -489,13 +518,16 @@ export default function MapScreen() {
           showsMyLocationButton={false}
         >
           {/* PATH MODE */}
-          {hasSelectedDevice && vizMode === "path" && !showConfidence && simplifiedPath.length >= 2 && (
-            <Polyline
-              coordinates={simplifiedPath}
-              strokeColor="#23b8f0"
-              strokeWidth={3}
-            />
-          )}
+          {hasSelectedDevice &&
+            vizMode === "path" &&
+            !showConfidence &&
+            simplifiedPath.length >= 2 && (
+              <Polyline
+                coordinates={simplifiedPath}
+                strokeColor="#23b8f0"
+                strokeWidth={3}
+              />
+            )}
 
           {/* PATH MODE - Distance-based colors (from YOUR location) */}
           {hasSelectedDevice &&
@@ -511,23 +543,28 @@ export default function MapScreen() {
             ))}
 
           {/* Start/End markers for path */}
-          {hasSelectedDevice && vizMode === "path" && simplifiedPath.length >= 2 && (
-            <>
-              <Marker coordinate={simplifiedPath[0]} anchor={{ x: 0.5, y: 0.5 }}>
-                <View style={s.startMarker}>
-                  <Text style={s.markerText}>S</Text>
-                </View>
-              </Marker>
-              <Marker
-                coordinate={simplifiedPath[simplifiedPath.length - 1]}
-                anchor={{ x: 0.5, y: 0.5 }}
-              >
-                <View style={s.endMarker}>
-                  <View style={s.endMarkerInner} />
-                </View>
-              </Marker>
-            </>
-          )}
+          {hasSelectedDevice &&
+            vizMode === "path" &&
+            simplifiedPath.length >= 2 && (
+              <>
+                <Marker
+                  coordinate={simplifiedPath[0]}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  <View style={s.startMarker}>
+                    <Text style={s.markerText}>S</Text>
+                  </View>
+                </Marker>
+                <Marker
+                  coordinate={simplifiedPath[simplifiedPath.length - 1]}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  <View style={s.endMarker}>
+                    <View style={s.endMarkerInner} />
+                  </View>
+                </Marker>
+              </>
+            )}
 
           {/* BUBBLES MODE */}
           {hasSelectedDevice &&
@@ -545,27 +582,33 @@ export default function MapScreen() {
                   radius={radius}
                   strokeColor={isMostRecent ? "#00ffaa" : "rgba(35,184,240,0.6)"}
                   strokeWidth={isMostRecent ? 3 : 1}
-                  fillColor={isMostRecent ? "rgba(0,255,170,0.25)" : "rgba(35,184,240,0.1)"}
+                  fillColor={
+                    isMostRecent
+                      ? "rgba(0,255,170,0.25)"
+                      : "rgba(35,184,240,0.1)"
+                  }
                 />
               );
             })}
 
           {/* Bubble mode warning if too many points */}
-          {hasSelectedDevice && vizMode === "bubbles" && detectionsWithCoords.length > 50 && (
-            <Marker
-              coordinate={{
-                latitude: region.latitude + region.latitudeDelta * 0.35,
-                longitude: region.longitude,
-              }}
-              anchor={{ x: 0.5, y: 0.5 }}
-            >
-              <View style={s.warningBadge}>
-                <Text style={s.warningText}>
-                  Showing 50/{detectionsWithCoords.length}
-                </Text>
-              </View>
-            </Marker>
-          )}
+          {hasSelectedDevice &&
+            vizMode === "bubbles" &&
+            detectionsWithCoords.length > 50 && (
+              <Marker
+                coordinate={{
+                  latitude: region.latitude + region.latitudeDelta * 0.35,
+                  longitude: region.longitude,
+                }}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                <View style={s.warningBadge}>
+                  <Text style={s.warningText}>
+                    Showing 50/{detectionsWithCoords.length}
+                  </Text>
+                </View>
+              </Marker>
+            )}
         </MapView>
 
         {loading && (
@@ -584,7 +627,10 @@ export default function MapScreen() {
               </Text>
 
               {recentDevices.length > 0 ? (
-                <ScrollView style={s.deviceList} showsVerticalScrollIndicator={false}>
+                <ScrollView
+                  style={s.deviceList}
+                  showsVerticalScrollIndicator={false}
+                >
                   {recentDevices.map((device) => (
                     <Pressable
                       key={device.mac}
@@ -594,7 +640,8 @@ export default function MapScreen() {
                       <View style={s.deviceInfo}>
                         <Text style={s.deviceMac}>{device.mac}</Text>
                         <Text style={s.deviceMeta}>
-                          {device.count} detections · {formatTimeAgo(device.lastSeen)}
+                          {device.count} detections ·{" "}
+                          {formatTimeAgo(device.lastSeen)}
                         </Text>
                       </View>
                       <Text style={s.deviceArrow}>→</Text>
@@ -619,27 +666,35 @@ export default function MapScreen() {
       </View>
 
       {/* Distance legend */}
-      {hasSelectedDevice && vizMode === "path" && showConfidence && userLocation && (
-        <View style={s.legend}>
-          <Text style={s.legendLabel}>Distance from You</Text>
-          <View style={s.legendGradient}>
-            <View style={[s.legendStop, { backgroundColor: "#00ff50" }]} />
-            <View style={[s.legendStop, { backgroundColor: "#ffaa00" }]} />
-            <View style={[s.legendStop, { backgroundColor: "#ff3232" }]} />
+      {hasSelectedDevice &&
+        vizMode === "path" &&
+        showConfidence &&
+        userLocation && (
+          <View style={s.legend}>
+            <Text style={s.legendLabel}>Distance from You</Text>
+            <View style={s.legendGradient}>
+              <View style={[s.legendStop, { backgroundColor: "#00ff50" }]} />
+              <View style={[s.legendStop, { backgroundColor: "#ffaa00" }]} />
+              <View style={[s.legendStop, { backgroundColor: "#ff3232" }]} />
+            </View>
+            <View style={s.legendLabels}>
+              <Text style={s.legendText}>Closest</Text>
+              <Text style={s.legendText}>Farthest</Text>
+            </View>
           </View>
-          <View style={s.legendLabels}>
-            <Text style={s.legendText}>Closest</Text>
-            <Text style={s.legendText}>Farthest</Text>
-          </View>
-        </View>
-      )}
+        )}
 
       {/* Show hint if no location for distance mode */}
-      {hasSelectedDevice && vizMode === "path" && showConfidence && !userLocation && (
-        <View style={s.legend}>
-          <Text style={s.legendLabel}>📍 Enable location to see distance colors</Text>
-        </View>
-      )}
+      {hasSelectedDevice &&
+        vizMode === "path" &&
+        showConfidence &&
+        !userLocation && (
+          <View style={s.legend}>
+            <Text style={s.legendLabel}>
+              📍 Enable location to see distance colors
+            </Text>
+          </View>
+        )}
     </SafeAreaView>
   );
 }
@@ -979,8 +1034,16 @@ const darkMapStyle = [
   { elementType: "labels.text.stroke", stylers: [{ color: "#1a2332" }] },
   { featureType: "poi", stylers: [{ visibility: "off" }] },
   { featureType: "road", elementType: "geometry", stylers: [{ color: "#2a3a4a" }] },
-  { featureType: "road", elementType: "labels", stylers: [{ visibility: "simplified" }] },
+  {
+    featureType: "road",
+    elementType: "labels",
+    stylers: [{ visibility: "simplified" }],
+  },
   { featureType: "water", elementType: "geometry", stylers: [{ color: "#0f1a28" }] },
   { featureType: "transit", stylers: [{ visibility: "off" }] },
-  { featureType: "administrative", elementType: "geometry", stylers: [{ visibility: "off" }] },
+  {
+    featureType: "administrative",
+    elementType: "geometry",
+    stylers: [{ visibility: "off" }],
+  },
 ];
