@@ -67,7 +67,7 @@ export default function LoginScreen() {
                 style={styles.input}
                 value={username}
                 onChangeText={setUsername}
-                placeholder="you@example.com"
+                placeholder="Enter your username"
                 placeholderTextColor="#9aa4b2"
                 autoCapitalize="none"
                 autoCorrect={false}
