@@ -46,10 +46,38 @@ async function getUserLocation() {
   }
 }
 
+/**
+ * Write search mode to ESP32
+ * @param device - Connected BLE device
+ * @param targetMac - MAC address like "AA:BB:CC:DD:EE:FF" or null to deactivate
+ * 
+ * ESP expects 6 raw bytes, not ASCII string:
+ * - To activate: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+ * - To deactivate: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+ */
 async function writeSearchMode(device: Device, targetMac: string | null) {
-  const macData = targetMac 
-    ? Buffer.from(targetMac.toUpperCase().replace(/[^0-9A-F:]/g, ''), 'ascii')
-    : Buffer.from([0, 0, 0, 0, 0, 0]);
+  let macData: Buffer;
+  
+  if (targetMac) {
+    // Convert "AA:BB:CC:DD:EE:FF" to [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+    const parts = targetMac.toUpperCase().split(':');
+    if (parts.length !== 6) {
+      throw new Error(`Invalid MAC address format: ${targetMac}`);
+    }
+    const bytes = parts.map(hex => {
+      const val = parseInt(hex, 16);
+      if (isNaN(val)) {
+        throw new Error(`Invalid hex value in MAC: ${hex}`);
+      }
+      return val;
+    });
+    macData = Buffer.from(bytes);
+  } else {
+    // Send 6 zero bytes to deactivate search mode
+    macData = Buffer.from([0, 0, 0, 0, 0, 0]);
+  }
+  
+  console.log('[BLE] Writing search mode bytes:', [...macData]);
   
   await device.writeCharacteristicWithResponseForService(
     UUIDS.WRITE_SERVICE,

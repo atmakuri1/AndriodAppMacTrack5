@@ -1,8 +1,8 @@
-// app/(tabs)/detections.tsx
+// app/(tabs)/detections.tsx - UPDATED
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   View, Text, FlatList, ActivityIndicator, Pressable, StyleSheet,
-  Alert, Platform, PermissionsAndroid
+  Alert, Platform, PermissionsAndroid, TextInput
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -14,6 +14,7 @@ import {
 } from "../../api";
 import {
   scanForNearbyDevices, collectDetectionsLive, stopLiveStream,
+  activateSearchModeLive, deactivateSearchModeLive,
   SimpleBleDevice
 } from "../../bleClient";
 
@@ -28,8 +29,12 @@ const U = {
 };
 
 // ---------- REUSABLE UI ----------
-const IconBtn = ({ icon, color = "#23b8f0", onPress }: any) => (
-  <Pressable style={s.iconBtn} onPress={onPress}>
+const IconBtn = ({ icon, color = "#23b8f0", onPress, disabled = false }: any) => (
+  <Pressable 
+    style={[s.iconBtn, disabled && s.disabled]} 
+    onPress={onPress}
+    disabled={disabled}
+  >
     <Ionicons name={icon} size={18} color={color} />
   </Pressable>
 );
@@ -74,7 +79,11 @@ const DetectionCard = ({ item, router }: any) => (
       <SignalBars rssi={item.rssi} />
       <View>
         <Text style={s.label}>Distance</Text>
-        <Text style={s.value}>{item.estimated_distance?.toFixed(1) ?? "—"}m</Text>
+        <Text style={s.value}>
+          {item.estimated_distance != null && item.estimated_distance !== ""
+            ? `${item.estimated_distance.toFixed(1)}m`
+            : "—"}
+        </Text>
       </View>
       <View>
         <Text style={s.label}>Time</Text>
@@ -103,9 +112,14 @@ export default function DetectionsScreen() {
   const [liveDevice, setLiveDevice] = useState<SimpleBleDevice | null>(null);
   const [recentMacs, setRecentMacs] = useState(new Map());
 
+  // Search mode state
+  const [trackingMac, setTrackingMac] = useState<string | null>(null);
+  const [searchModeLoading, setSearchModeLoading] = useState(false);
+  const [macSearchInput, setMacSearchInput] = useState<string>("");
+
   const liveRef = useRef(false);
   const recentRef = useRef(new Map());
-  const trackRef = useRef<string | null>(null);
+  const refreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // ---------- LOAD HISTORY ----------
   const load = async (mac?: string) => {
@@ -129,6 +143,10 @@ export default function DetectionsScreen() {
   useEffect(() => {
     return () => {
       if (liveRef.current) stopLiveStream();
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current);
+        refreshIntervalRef.current = null;
+      }
     };
   }, []);
 
@@ -156,6 +174,66 @@ export default function DetectionsScreen() {
     }
   };
 
+  // ---------- SEARCH MODE CONTROLS ----------
+  const activateSearchMode = async (mac: string) => {
+    setSearchModeLoading(true);
+    try {
+      await activateSearchModeLive(mac);
+      setTrackingMac(mac);
+      setMacSearchInput("");
+      console.log('[Search Mode] Activated for:', mac);
+    } catch (e: any) {
+      console.error('[Search Mode] Failed to activate:', e);
+      Alert.alert("Search Mode Error", e?.message || "Failed to activate search mode");
+    } finally {
+      setSearchModeLoading(false);
+    }
+  };
+
+  const handleMacInputChange = (text: string) => {
+    // Remove all non-hex characters
+    const cleaned = text.toUpperCase().replace(/[^0-9A-F]/g, '');
+    
+    // Add colons every 2 characters
+    let formatted = '';
+    for (let i = 0; i < cleaned.length && i < 12; i++) {
+      if (i > 0 && i % 2 === 0) {
+        formatted += ':';
+      }
+      formatted += cleaned[i];
+    }
+    
+    setMacSearchInput(formatted);
+  };
+
+  const handleManualMacSearch = () => {
+    // Clean up input - remove spaces, uppercase
+    const cleanMac = macSearchInput.trim().toUpperCase();
+    
+    // Validate MAC format (XX:XX:XX:XX:XX:XX)
+    const macRegex = /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/;
+    if (!macRegex.test(cleanMac)) {
+      Alert.alert("Invalid MAC", "Enter a valid MAC address\n(e.g. AA:BB:CC:DD:EE:FF)");
+      return;
+    }
+    
+    activateSearchMode(cleanMac);
+  };
+
+  const deactivateSearchMode = async () => {
+    setSearchModeLoading(true);
+    try {
+      await deactivateSearchModeLive();
+      console.log('[Search Mode] Deactivated');
+    } catch (e: any) {
+      // Log but don't alert - the ESP probably got the message
+      console.warn('[Search Mode] Deactivate warning:', e?.message);
+    }
+    // Always clear tracking state regardless of error
+    setTrackingMac(null);
+    setSearchModeLoading(false);
+  };
+
   // ---------- START STREAM ----------
   const startLive = async (device: SimpleBleDevice) => {
     const token = await SecureStore.getItemAsync("token");
@@ -166,16 +244,19 @@ export default function DetectionsScreen() {
     liveRef.current = true;
     recentRef.current = new Map();
     setRecentMacs(new Map());
+    setTrackingMac(null);
+
+    // Start periodic refresh of detection list
+    refreshIntervalRef.current = setInterval(() => {
+      load(filterMac);
+    }, 3000); // Refresh every 3 seconds
 
     await collectDetectionsLive(
       null,
       async (batch) => {
-        const target = trackRef.current?.toUpperCase();
-        const filtered = target ? batch.filter((b) => b.mac_address?.toUpperCase() === target) : batch;
-
-        if (filtered.length) {
-          await createDetectionsBatch(filtered);
-          load(filterMac);
+        // ESP handles filtering when in search mode, so just upload everything
+        if (batch.length) {
+          await createDetectionsBatch(batch);
         }
       },
       (status) => {
@@ -191,9 +272,16 @@ export default function DetectionsScreen() {
       { deviceId: device.id }
     );
 
+    // Cleanup when stream ends
+    if (refreshIntervalRef.current) {
+      clearInterval(refreshIntervalRef.current);
+      refreshIntervalRef.current = null;
+    }
+    
     setLive(false);
     setLiveDevice(null);
     liveRef.current = false;
+    setTrackingMac(null);
   };
 
   useEffect(() => {
@@ -201,11 +289,31 @@ export default function DetectionsScreen() {
     (async () => await startLive(liveDevice))();
   }, [liveDevice]);
 
-  const stopLive = () => {
+  // ---------- STOP STREAM ----------
+  const stopLive = async () => {
+    // Clear refresh interval
+    if (refreshIntervalRef.current) {
+      clearInterval(refreshIntervalRef.current);
+      refreshIntervalRef.current = null;
+    }
+    
+    // Deactivate search mode first if active (don't fail hard)
+    if (trackingMac) {
+      try {
+        await deactivateSearchModeLive();
+      } catch (e) {
+        console.warn('[Search Mode] Deactivate on stop warning:', e);
+      }
+      setTrackingMac(null);
+    }
+    
     stopLiveStream();
     liveRef.current = false;
     setLive(false);
     setLiveDevice(null);
+    
+    // Final refresh to get latest data
+    load(filterMac);
   };
 
   const renderItem = useCallback(({ item }: any) => <DetectionCard item={item} router={router} />, []);
@@ -232,21 +340,77 @@ export default function DetectionsScreen() {
                   <IconBtn icon="stop" color="#fff" onPress={stopLive} />
                 </View>
 
-                {!trackRef.current ? (
+                {!trackingMac ? (
                   <View style={s.recentBox}>
-                    {!recentList.length ? (
-                      <Text style={s.wait}>Waiting...</Text>
-                    ) : recentList.map((r) => (
-                      <Pressable key={r.mac_address} style={s.recentRow} onPress={() => (trackRef.current = r.mac_address)}>
-                        <Text style={s.recentMac}>{r.mac_address}</Text>
-                        <SignalBars rssi={r.rssi} />
+                    {/* Manual MAC search input */}
+                    <View style={s.searchInputRow}>
+                      <TextInput
+                        style={s.macInput}
+                        placeholder="AA:BB:CC:DD:EE:FF"
+                        placeholderTextColor="#6b7a8f"
+                        value={macSearchInput}
+                        onChangeText={handleMacInputChange}
+                        autoCapitalize="characters"
+                        autoCorrect={false}
+                        keyboardType="ascii-capable"
+                      />
+                      <Pressable 
+                        style={[s.searchBtn, (macSearchInput.length !== 17 || searchModeLoading) && s.disabled]}
+                        onPress={handleManualMacSearch}
+                        disabled={macSearchInput.length !== 17 || searchModeLoading}
+                      >
+                        {searchModeLoading ? (
+                          <ActivityIndicator size="small" color="#111" />
+                        ) : (
+                          <Ionicons name="search" size={18} color="#111" />
+                        )}
                       </Pressable>
-                    ))}
+                    </View>
+                    
+                    {!recentList.length ? (
+                      <Text style={s.wait}>Waiting for detections...</Text>
+                    ) : (
+                      <>
+                        <Text style={s.recentTitle}>Tap to track • Long press for map:</Text>
+                        {recentList.map((r) => (
+                          <Pressable 
+                            key={r.mac_address} 
+                            style={[s.recentRow, searchModeLoading && s.disabled]} 
+                            onPress={() => activateSearchMode(r.mac_address)}
+                            onLongPress={() => router.push({ pathname: "/(tabs)/map", params: { mac: r.mac_address } })}
+                            disabled={searchModeLoading}
+                          >
+                            <Text style={s.recentMac}>{r.mac_address}</Text>
+                            <View style={s.recentRowRight}>
+                              <SignalBars rssi={r.rssi} />
+                              <Ionicons name="map-outline" size={14} color="#3a4a5a" />
+                            </View>
+                          </Pressable>
+                        ))}
+                      </>
+                    )}
                   </View>
                 ) : (
                   <View style={s.trackBox}>
-                    <Text style={s.trackTxt}>Tracking {trackRef.current}</Text>
-                    <IconBtn icon="close" onPress={() => (trackRef.current = null)} />
+                    <View style={s.trackHeader}>
+                      <Ionicons name="locate" size={16} color="#00ffaa" />
+                      <Text style={s.trackLabel}>SEARCH MODE ACTIVE</Text>
+                    </View>
+                    <Text style={s.trackMac}>{trackingMac}</Text>
+                    <Pressable 
+                      style={[s.stopSearchBtn, searchModeLoading && s.disabled]}
+                      onPress={deactivateSearchMode}
+                      disabled={searchModeLoading}
+                    >
+                      {searchModeLoading ? (
+                        <ActivityIndicator size="small" color="#ff6b6b" />
+                      ) : (
+                        <>
+                          <Ionicons name="close-circle" size={16} color="#ff6b6b" />
+                          <Text style={s.stopSearchTxt}>Stop Search</Text>
+                        </>
+                      )}
+                    </Pressable>
                   </View>
                 )}
               </View>
@@ -326,7 +490,7 @@ const s = StyleSheet.create({
   badge: { backgroundColor: "#23b8f022", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
   badgeTxt: { color: "#23b8f0", fontSize: 10 },
 
-  stats: { flexDirection: "row", alignItems: "center", gap: 16 },
+  stats: { flexDirection: "row", alignItems: "center", gap: 16, marginTop: 8 },
   label: { color: "#6b7a8f", fontSize: 10 },
   value: { color: "#fff", fontSize: 12, fontWeight: "600" },
 
@@ -346,29 +510,97 @@ const s = StyleSheet.create({
   liveBadge: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#ff3b30", padding: 6, borderRadius: 4 },
   dot: { width: 6, height: 6, backgroundColor: "#fff", borderRadius: 3 },
   liveTxt: { color: "#fff", fontSize: 10, fontWeight: "700" },
-  liveName: { color: "#fff", flex: 1 },
+  liveName: { color: "#fff", flex: 1, marginLeft: 8 },
 
   recentBox: { marginTop: 10 },
-  wait: { color: "#445", textAlign: "center", padding: 10 },
+  recentTitle: { color: "#6b7a8f", fontSize: 11, marginBottom: 8, marginTop: 10 },
+  
+  // MAC Search Input
+  searchInputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  macInput: {
+    flex: 1,
+    backgroundColor: "#111a24",
+    borderRadius: 10,
+    padding: 12,
+    color: "#fff",
+    fontFamily: Mono,
+    fontSize: 13,
+    borderWidth: 1,
+    borderColor: "#23b8f033",
+  },
+  searchBtn: {
+    backgroundColor: "#23b8f0",
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  wait: { color: "#6b7a8f", textAlign: "center", padding: 10 },
   recentRow: {
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
     padding: 10,
     backgroundColor: "#111a24",
     borderRadius: 10,
     marginBottom: 6,
   },
-  recentMac: { color: "#fff", fontFamily: Mono },
+  recentMac: { color: "#fff", fontFamily: Mono, fontSize: 12 },
+  recentRowRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
 
+  // Search Mode / Tracking Box
   trackBox: {
     marginTop: 10,
-    backgroundColor: "#00ffaa22",
+    backgroundColor: "#00ffaa15",
     padding: 12,
     borderRadius: 10,
-    flexDirection: "row",
-    justifyContent: "space-between",
+    borderWidth: 1,
+    borderColor: "#00ffaa44",
   },
-  trackTxt: { color: "#00ffaa", fontWeight: "700", fontFamily: Mono },
+  trackHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 6,
+  },
+  trackLabel: { 
+    color: "#00ffaa", 
+    fontSize: 10, 
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  trackMac: { 
+    color: "#fff", 
+    fontWeight: "700", 
+    fontFamily: Mono,
+    fontSize: 14,
+    marginBottom: 10,
+  },
+  stopSearchBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "#ff6b6b22",
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#ff6b6b44",
+  },
+  stopSearchTxt: {
+    color: "#ff6b6b",
+    fontWeight: "600",
+    fontSize: 13,
+  },
 
   // Connect Panel
   connection: {
@@ -418,5 +650,5 @@ const s = StyleSheet.create({
   count: { backgroundColor: "#23b8f022", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
   countTxt: { color: "#23b8f0", fontWeight: "700" },
 
-  empty: { color: "#445", textAlign: "center", marginTop: 50, fontSize: 16 },
+  empty: { color: "#6b7a8f", textAlign: "center", marginTop: 50, fontSize: 16 },
 });
